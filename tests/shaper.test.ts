@@ -21,11 +21,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const extension = join(root, "extensions", "shaper.ts");
 const testProvider = join(root, "tests", "fixtures", "shaper-test-provider.ts");
 
-/** The prompt every test types, worded the way a thin prompt is: a goal and nothing else. */
-const TYPED = "fix the login bug";
-
-/** The same thin prompt, named for the trigger tests. */
-const THIN = TYPED;
+/**
+ * The thin prompt the tests type: a goal and nothing else, so context, constraints and done-when
+ * are missing.
+ */
+const THIN = "fix the login bug";
 
 /** A prompt carrying all four standing elements, in the Boss's prose rather than under headers. */
 const COMPLETE =
@@ -53,14 +53,11 @@ const STANDING_ELEMENTS = ["goal", "context", "constraints", "done-when"] as con
 /** The settings a workspace's pi reads when shaping is on. */
 const SHAPING_ON = { shaper: { enabled: true } };
 
-/** The check's report when a test does not set one: every standing element present. */
-const ALL_PRESENT = '{"goal":true,"context":true,"constraints":true,"done-when":true}';
-
 /**
  * One temporary Mac: a HOME, an agent folder pi reads its settings from, the test provider's log,
- * and the element report the session's model gives the Shaper's check.
+ * and, when a test names one, the element report the session's model gives the Shaper's check.
  */
-type Workspace = { dir: string; home: string; agentDir: string; log: string; check: string };
+type Workspace = { dir: string; home: string; agentDir: string; log: string; check?: string };
 
 /** What a test sets up before pi runs: its settings, and the report the check's model gives. */
 type WorkspaceOptions = { settings?: Record<string, unknown>; check?: string };
@@ -84,12 +81,16 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 	// missing file stays a fault instead of answering the same as no request.
 	writeFileSync(log, "");
 	if (options.settings !== undefined) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
-	const workspace = { dir, home, agentDir, log, check: options.check ?? ALL_PRESENT };
+	const workspace = { dir, home, agentDir, log, check: options.check };
 	workspaces.push(workspace);
 	return workspace;
 }
 
-/** The environment a pi process runs in: a temporary HOME and agent folder, and the provider's log. */
+/**
+ * The environment a pi process runs in: a temporary HOME and agent folder, the provider's log, and,
+ * when a test names one, the element report the check's model gives. A test that names no report
+ * leaves the variable out, so the provider's own default answers.
+ */
 const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	...process.env,
 	HOME: workspace.home,
@@ -98,7 +99,7 @@ const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	PI_OFFLINE: "1",
 	PI_TELEMETRY: "0",
 	SHAPER_TEST_LOG: workspace.log,
-	SHAPER_TEST_CHECK_REPORT: workspace.check,
+	...(workspace.check === undefined ? {} : { SHAPER_TEST_CHECK_REPORT: workspace.check }),
 });
 
 /**
@@ -122,11 +123,14 @@ async function withPiEnvironment<T>(workspace: Workspace, run: () => Promise<T>)
 	}
 }
 
+/** What pi's resource loader reports it loaded: the extensions, and any extension that failed to load. */
+type LoadedExtensions = { errors: unknown[]; extensions: { sourceInfo: { path: string } }[] };
+
 /** The slice of pi's SDK these tests use. */
 type PiSdk = {
 	DefaultResourceLoader: new (options: Record<string, unknown>) => {
 		reload(): Promise<void>;
-		getExtensions(): { errors: unknown[]; extensions: { sourceInfo: { path: string } }[] };
+		getExtensions(): LoadedExtensions;
 	};
 	createAgentSession(options: Record<string, unknown>): Promise<{ session: SdkSession }>;
 	SessionManager: { inMemory(cwd: string): unknown };
@@ -200,36 +204,29 @@ function mainRequests(workspace: Workspace): Request[] {
 /** One notice the Shaper showed the Boss through pi's UI. */
 type Notice = { message: string; type?: "info" | "warning" | "error" };
 
-/** pi's UI as a test sees it: the notices the Shaper shows the Boss. */
-type TestUi = { notices: Notice[]; ui: ExtensionUIContext };
-
-/**
- * The Boss's screen as a test sees it: a recorder for the notices the Shaper shows. It stands in
- * for pi's UI port at the edge, so a test reads the Shaper's report the way the Boss reads it.
- * Only the notice is implemented because it is the one UI the Shaper uses in this slice; pi types
- * the whole port, so the cast avoids a stand-in full of no-ops. The next slice adds the editor.
- */
-function makeTestUi(): TestUi {
-	const notices: Notice[] = [];
-	const ui = {
-		notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }),
-	} as unknown as ExtensionUIContext;
-	return { notices, ui };
-}
+/** What one in-process session leaves a test to read: the notices the Shaper showed, and what pi loaded. */
+type SessionReadings = { notices: Notice[]; loaded: LoadedExtensions };
 
 /**
  * Type one prompt into a real pi session that loads the package, with the Boss's screen standing
- * in at the UI edge, and return the notices the Shaper showed. What the session's model was
- * asked stays in the test provider's log. The environment is swapped for the session and restored
- * afterwards, so a later test starts clean even though the process is shared.
+ * in at the UI edge, and return what the session leaves a test to read: the notices the Shaper
+ * showed the Boss and the extensions pi loaded from the package directory. What the session's
+ * model was asked stays in the test provider's log. The environment is swapped for the session
+ * and restored afterwards, so a later test starts clean even though the process is shared.
  */
-async function promptInSession(workspace: Workspace, text: string): Promise<TestUi> {
-	const testUi = makeTestUi();
-	await withPiEnvironment(workspace, async () => {
+async function promptInSession(workspace: Workspace, text: string): Promise<SessionReadings> {
+	const notices: Notice[] = [];
+	// pi types the whole UI port; only the notice is implemented because it is the one UI the Shaper
+	// uses in this slice, so the cast avoids a stand-in full of no-ops. The next slice adds the editor.
+	const ui = {
+		notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }),
+	} as unknown as ExtensionUIContext;
+	const loaded = await withPiEnvironment(workspace, async () => {
 		const sdk = await loadPiSdk();
 		const loader = new sdk.DefaultResourceLoader({
 			cwd: workspace.dir,
 			agentDir: workspace.agentDir,
+			// The package directory, so pi reads the extension from package.json's pi.extensions.
 			additionalExtensionPaths: [root, testProvider],
 			noSkills: true,
 			noPromptTemplates: true,
@@ -237,6 +234,7 @@ async function promptInSession(workspace: Workspace, text: string): Promise<Test
 			noContextFiles: true,
 		});
 		await loader.reload();
+		const extensions = loader.getExtensions();
 		const { session } = await sdk.createAgentSession({
 			cwd: workspace.dir,
 			agentDir: workspace.agentDir,
@@ -246,13 +244,14 @@ async function promptInSession(workspace: Workspace, text: string): Promise<Test
 			settingsManager: sdk.SettingsManager.create(workspace.dir, workspace.agentDir),
 		});
 		try {
-			await session.bindExtensions({ uiContext: testUi.ui, mode: "tui" });
+			await session.bindExtensions({ uiContext: ui, mode: "tui" });
 			await session.prompt(text);
 		} finally {
 			session.dispose();
 		}
+		return extensions;
 	});
-	return testUi;
+	return { notices, loaded };
 }
 
 /** Run the installed pi with the package directory and one typed prompt. */
@@ -266,51 +265,24 @@ function runPi(workspace: Workspace, prompt: string) {
 
 test("the package loads the Shaper extension, and with shaping off by default the typed prompt reaches the main model untouched", async () => {
 	const workspace = makeWorkspace();
-	await withPiEnvironment(workspace, async () => {
-		const sdk = await loadPiSdk();
-		const loader = new sdk.DefaultResourceLoader({
-			cwd: workspace.dir,
-			agentDir: workspace.agentDir,
-			// The package directory, so pi reads the extension from package.json's pi.extensions.
-			additionalExtensionPaths: [root, testProvider],
-			noSkills: true,
-			noPromptTemplates: true,
-			noThemes: true,
-			noContextFiles: true,
-		});
-		await loader.reload();
-		const loaded = loader.getExtensions();
-		assert.deepEqual(loaded.errors, [], "every extension the test loads loaded without errors");
-		assert.ok(
-			loaded.extensions.some(({ sourceInfo }) => realpathSync(sourceInfo.path) === realpathSync(extension)),
-			"the Shaper extension is one of the extensions pi loaded",
-		);
-		const { session } = await sdk.createAgentSession({
-			cwd: workspace.dir,
-			agentDir: workspace.agentDir,
-			model: MAIN_MODEL,
-			resourceLoader: loader,
-			sessionManager: sdk.SessionManager.inMemory(workspace.dir),
-			settingsManager: sdk.SettingsManager.create(workspace.dir, workspace.agentDir),
-		});
-		try {
-			await session.prompt(TYPED);
-		} finally {
-			session.dispose();
-		}
-	});
+	const { loaded } = await promptInSession(workspace, THIN);
+	assert.deepEqual(loaded.errors, [], "every extension the test loads loaded without errors");
+	assert.ok(
+		loaded.extensions.some(({ sourceInfo }) => realpathSync(sourceInfo.path) === realpathSync(extension)),
+		"the Shaper extension is one of the extensions pi loaded",
+	);
 	const main = requests(workspace);
 	assert.equal(main.length, 1, "the prompt reached the main model once");
-	assert.equal(main[0].messages.at(-1), TYPED, "the main model received the words the Boss typed and nothing else");
+	assert.equal(main[0].messages.at(-1), THIN, "the main model received the words the Boss typed and nothing else");
 });
 
 test("pi loads the package directory, and with shaping off by default the typed prompt reaches the main model untouched", () => {
 	const workspace = makeWorkspace();
-	const result = runPi(workspace, TYPED);
+	const result = runPi(workspace, THIN);
 	assert.equal(result.status, 0, result.stderr);
 	const main = requests(workspace).filter((request) => request.provider === "shaper-test");
 	assert.equal(main.length, 1, "the prompt reached the main model once");
-	assert.equal(main[0].messages.at(-1), TYPED, "the main model received the words the Boss typed and nothing else");
+	assert.equal(main[0].messages.at(-1), THIN, "the main model received the words the Boss typed and nothing else");
 });
 
 test("a thin prompt engages the Shaper, which reports each standing element as present or missing", async () => {

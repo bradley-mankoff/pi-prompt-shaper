@@ -66,7 +66,7 @@ provider at the provider edge playing the session's own model. One test asks pi'
 loader which extensions loaded and types a prompt in-process; the other loads the package
 directory with the installed `pi` command. The trigger tests type a prompt in-process with a
 recorder standing in for the Boss's screen, so they read the Shaper's report the way the Boss
-reads it. Every test checks what the main model received and what the Shaper said, never how the
+reads it. Every test checks what the main model received or what the Shaper said, never how the
 extension is built.
 
 ## License

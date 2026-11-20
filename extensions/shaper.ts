@@ -19,7 +19,7 @@
  * `ctx.ui.notify()`, the same notice the tests read.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Api, Context, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 
 /** What pi's settings.json holds under the shaper key. */
 type ShaperSettings = { enabled?: boolean };
@@ -80,8 +80,8 @@ Answer with one JSON object and nothing else, one boolean per element:
 {"goal": true, "context": false, "constraints": false, "done-when": false}`;
 
 /** The text an assistant message carries, which is where the check's reply lives. */
-const textOf = (message: { content: { type: string; text?: string }[] }): string =>
-	message.content.flatMap((part) => (part.type === "text" && typeof part.text === "string" ? [part.text] : [])).join("");
+const textOf = (message: AssistantMessage): string =>
+	message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 
 /**
  * Read the model's reply as one report per standing element, or `undefined` when it is not that.
@@ -107,13 +107,13 @@ function readElementReport(reply: string): ElementReport[] | undefined {
 	return report;
 }
 
-/** Whether a report leaves a standing element missing, which is what makes a prompt thin. */
-function isThin(report: readonly ElementReport[]): boolean {
-	return report.some(({ present }) => !present);
-}
-
-/** Every standing element of a thin prompt, said present or missing, in the order the Boss reads them. */
-function reportLine(report: readonly ElementReport[]): string {
+/**
+ * The notice a report earns, or `undefined` when the Boss is to be told nothing: either the check
+ * could not be read, or the prompt carries every standing element and is not thin. A thin prompt's
+ * notice names every element present or missing, in the order the Boss reads them.
+ */
+function thinPromptNotice(report: readonly ElementReport[] | undefined): string | undefined {
+	if (report === undefined || report.every(({ present }) => present)) return undefined;
 	const elements = report.map(({ element, present }) => `${element} ${present ? "present" : "missing"}`).join("; ");
 	return `Shaper: thin prompt. ${elements}`;
 }
@@ -157,8 +157,8 @@ export default function shaper(pi: ExtensionAPI): void {
 		if (!shapingEnabled(pi.getSettings())) return { action: "continue" };
 		// The trigger is thinness: a prompt that carries every element passes untouched and silently,
 		// while a thin one gets the elements reported. This slice has no reshape, so the prompt goes on.
-		const report = await checkElements(ctx, event.text);
-		if (report !== undefined && isThin(report)) ctx.ui.notify(reportLine(report), "info");
+		const notice = thinPromptNotice(await checkElements(ctx, event.text));
+		if (notice !== undefined) ctx.ui.notify(notice, "info");
 		return { action: "continue" };
 	});
 }
