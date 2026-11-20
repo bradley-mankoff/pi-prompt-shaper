@@ -31,15 +31,14 @@ const api = "shaper-test";
 
 /**
  * The first line of the Shaper's element check, which only that request carries, so this provider
- * can tell the check and the reshape from the prompt's own run and answer each the way the test
- * set up.
+ * can tell the Shaper's calls from the prompt's own run and answer each the way the test set up.
  */
 const CHECK_MARK = "You are the Shaper's element check.";
 
 /** The first line of the Shaper's inference, the request that fills the elements a prompt lacks. */
 const INFER_MARK = "You are the Shaper's inference.";
 
-/** The first line of the Shaper's reshape, the other request the Shaper makes of the model. */
+/** The first line of the Shaper's reshape, the third request the Shaper makes of the model. */
 const RESHAPE_MARK = "You are the Shaper's reshape.";
 
 /** The four requests a session's model can see: the prompt's own run, and the Shaper's three calls. */

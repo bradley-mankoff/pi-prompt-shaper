@@ -174,12 +174,15 @@ const NO_CONTEXT_SHAPE_FIELDS = JSON.stringify({
 	"done-when": "and done when tests/queue.test.ts passes",
 });
 
-/** The shaped prompt the Boss sees when the session fills SHORT_NO_CONTEXT's context. */
-const CONTEXT_FILLED_SHAPE = `## Goal
+/**
+ * The shaped prompt the Boss sees when SHORT_NO_CONTEXT's context is filled with the given words:
+ * the three elements the prompt carries, and the fill under Context.
+ */
+const contextFilledShape = (context: string): string => `## Goal
 Rename recieve to receive
 
 ## Context
-${SESSION_CONTEXT_FILL}
+${context}
 
 ## Constraints
 keep the JSON shape the CLI tests parse
@@ -187,44 +190,12 @@ keep the JSON shape the CLI tests parse
 ## Done-when
 and done when tests/queue.test.ts passes`;
 
-/** The shaped prompt the Boss sees when the project's notes fill SHORT_NO_CONTEXT's context. */
-const NOTES_FILLED_SHAPE = `## Goal
-Rename recieve to receive
+/** The notice a prompt whose only gap is context earns when nothing fills it. */
+const CONTEXT_QUESTION_NOTICE =
+	"Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when present";
 
-## Context
-${NOTES_CONTEXT_FILL}
-
-## Constraints
-keep the JSON shape the CLI tests parse
-
-## Done-when
-and done when tests/queue.test.ts passes`;
-
-/** The shaped prompt the Boss sees when the project's Beads fill SHORT_NO_CONTEXT's context. */
-const BEAD_FILLED_SHAPE = `## Goal
-Rename recieve to receive
-
-## Context
-${BEAD_CONTEXT_FILL}
-
-## Constraints
-keep the JSON shape the CLI tests parse
-
-## Done-when
-and done when tests/queue.test.ts passes`;
-
-/** The shaped prompt the Boss sees when the branch fills SHORT_NO_CONTEXT's context. */
-const BRANCH_FILLED_SHAPE = `## Goal
-Rename recieve to receive
-
-## Context
-${BRANCH}
-
-## Constraints
-keep the JSON shape the CLI tests parse
-
-## Done-when
-and done when tests/queue.test.ts passes`;
+/** The notice after a shape that filled context from the session's words. */
+const CONTEXT_FILLED_NOTICE = "Shaper: shaped. context filled from the session. alt+r restores your words.";
 
 /**
  * A prompt short enough that the headers matter to the cap: four words give a 12-word cap, and the
@@ -454,7 +425,13 @@ const loadPiSdk = (): Promise<PiSdk> =>
 	(piSdk ??= import(pathToFileURL(join(piPackageRoot(), "dist", "index.js")).href).then((module) => module as PiSdk));
 
 /** One request the test provider saw, as it wrote it to the log. */
-type Request = { provider: string; model: string; kind: "main" | "check" | "reshape"; system: string; messages: string[] };
+type Request = {
+	provider: string;
+	model: string;
+	kind: "main" | "check" | "infer" | "reshape";
+	system: string;
+	messages: string[];
+};
 
 /** Every request the test provider wrote, in order. */
 function requests(workspace: Workspace): Request[] {
@@ -698,7 +675,7 @@ test("a prompt missing its context reports the context marked for a question and
 	const { notices } = await promptInSession(workspace, NO_CONTEXT);
 	assert.deepEqual(
 		notices.map(({ message }) => message),
-		["Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when present"],
+		[CONTEXT_QUESTION_NOTICE],
 	);
 });
 
@@ -909,12 +886,12 @@ test("a gap the session already fills is inferred from the conversation, and the
 		await session.prompt(SHORT_NO_CONTEXT);
 		assert.equal(
 			session.editorText(),
-			CONTEXT_FILLED_SHAPE,
+			contextFilledShape(SESSION_CONTEXT_FILL),
 			"the editor holds the prompt under the four headers, with the session's words under Context",
 		);
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			["Shaper: shaped. context filled from the session. alt+r restores your words."],
+			[CONTEXT_FILLED_NOTICE],
 			"the Boss is told the shape carries context the session supplied",
 		);
 		const main = mainRequests(workspace);
@@ -935,12 +912,12 @@ test("a gap the project's notes already fill is inferred from them, and the shap
 		await session.prompt(SHORT_NO_CONTEXT);
 		assert.equal(
 			session.editorText(),
-			NOTES_FILLED_SHAPE,
+			contextFilledShape(NOTES_CONTEXT_FILL),
 			"the editor holds the prompt under the four headers, with the project's notes under Context",
 		);
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			["Shaper: shaped. context filled from the session. alt+r restores your words."],
+			[CONTEXT_FILLED_NOTICE],
 			"the Boss is told the shape carries context the session supplied",
 		);
 	});
@@ -958,7 +935,7 @@ test("a gap the branch already fills is inferred from it, and the shaped prompt 
 		await session.prompt(SHORT_NO_CONTEXT);
 		assert.equal(
 			session.editorText(),
-			BRANCH_FILLED_SHAPE,
+			contextFilledShape(BRANCH),
 			"the editor holds the prompt under the four headers, with the branch under Context",
 		);
 	});
@@ -976,7 +953,7 @@ test("a gap the project's Beads already fill is inferred from them, and the shap
 		await session.prompt(SHORT_NO_CONTEXT);
 		assert.equal(
 			session.editorText(),
-			BEAD_FILLED_SHAPE,
+			contextFilledShape(BEAD_CONTEXT_FILL),
 			"the editor holds the prompt under the four headers, with what the Beads remember under Context",
 		);
 	});
@@ -994,7 +971,7 @@ test("an inference drawn only from pi's own briefing words is refused, and the g
 		assert.equal(session.editorText(), "", "nothing is put in the editor, so no invented words reach the Boss");
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			["Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when present"],
+			[CONTEXT_QUESTION_NOTICE],
 			"the fill the session's own sources do not carry is refused, and the context becomes a question",
 		);
 	});
@@ -1013,7 +990,7 @@ test("an inference made of a piece of a word the session said is refused, and th
 		assert.equal(session.editorText(), "", "nothing is put in the editor, so half a path never reaches the Boss");
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			["Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when present"],
+			[CONTEXT_QUESTION_NOTICE],
 			"the fill built from part of a path the session gave is refused, and the context becomes a question",
 		);
 	});
@@ -1055,7 +1032,7 @@ test("an inference the session's words do not carry is never filled, and the gap
 		assert.equal(session.editorText(), "", "nothing is put in the editor, so no invented words reach the Boss");
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			["Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when present"],
+			[CONTEXT_QUESTION_NOTICE],
 			"the fill the session does not carry is refused, and the context becomes a question",
 		);
 		assert.equal(
@@ -1079,8 +1056,8 @@ test("the Shaper asks the session's own model to infer from the repo, the branch
 		assert.equal(extra.length, 0, "the Shaper asked for one inference");
 		assert.equal(call.model, "main", "the inference runs on the session's own model");
 		const reading = call.messages.at(-1) ?? "";
-		assert.ok(reading.includes(`Repo: ${workspace.dir}`), "the inference reads the repo the session runs in");
-		assert.ok(reading.includes(`Branch: ${BRANCH}`), "the inference reads the branch the session is on");
+		assert.ok(reading.includes(`Repo:\n${workspace.dir}`), "the inference reads the repo the session runs in");
+		assert.ok(reading.includes(`Branch:\n${BRANCH}`), "the inference reads the branch the session is on");
 		assert.ok(reading.includes(EARLIER_TURN), "the inference reads the conversation the session already had");
 		assert.ok(reading.includes(BEAD_FACT), "the inference reads what the project's Beads remember");
 		assert.ok(reading.includes(NOTES_FACT), "the inference reads the project's own notes");

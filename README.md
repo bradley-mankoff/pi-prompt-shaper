@@ -82,9 +82,8 @@ in-process with a recorder standing in for the Boss's screen, so they read the S
 the editor the way the Boss does, and press the revert key through pi's shortcut registry. The
 inference tests stage the session a fill may come from: an earlier turn for the conversation, a git
 repository with a branch, an `AGENTS.md` for the project's notes, and a `bd` memory for Beads, then
-type the thin prompt. Every test checks what the main model received, what
-the Shaper said, what it asked the session's model to do, or what it left in the editor, never how
-the extension is built.
+type the thin prompt. Every test checks what the main model received, what the Shaper said, what it
+asked the session's model to do, or what it left in the editor, never how the extension is built.
 
 ## License
 

@@ -8,10 +8,10 @@
  * remember, the conversation so far and the project's own notes), and each gap the session cannot
  * fill is marked for the scout, where the answer can be looked up, or for a question, where it
  * cannot. Nothing is invented: a fill survives only when every word of it is a word the session
- * itself carries. A short prompt whose four elements are then all
- * there is reshaped: words moved under the four headers, put in the editor for the Boss to accept
- * or edit, never sent by itself. The original is kept, and one press of `alt+r` puts it back in the
- * editor. A prompt that still has a gap is reported element by element and goes on as typed.
+ * itself carries. A short prompt whose four elements are then all there is reshaped: words moved
+ * under the four headers, put in the editor for the Boss to accept or edit, never sent by itself.
+ * The original is kept, and one press of `alt+r` puts it back in the editor. A prompt that still has
+ * a gap is reported element by element and goes on as typed.
  *
  * Shaping is opt-in under the `shaper.enabled` setting, which is off when it is absent, so the
  * Tweaker's silence stays the default (pp-csw).
@@ -79,8 +79,8 @@ type ElementState =
 const CHECK_MARK = "You are the Shaper's element check.";
 
 /**
- * What each standing element means, shared by the check and the reshape so the two calls judge
- * against the same definitions.
+ * What each standing element means, shared by the check, the inference and the reshape so the three
+ * calls judge against the same definitions.
  */
 const ELEMENT_GUIDE = `- goal: what the Boss wants done.
 - context: the situation that aims the work: the repo or file, the error or behaviour, the branch,
@@ -143,26 +143,6 @@ function readElementReport(reply: string): ElementReport[] | undefined {
 		report.push({ element, present });
 	}
 	return report;
-}
-
-/** The words each standing element's place in the cascade gets in the notice. */
-const STANDING_WORDS: Record<ElementState["standing"], string> = {
-	present: "present",
-	filled: "filled from the session",
-	missing: "missing",
-	scout: "marked for the scout",
-	ask: "marked for a question",
-};
-
-/**
- * The notice a thin prompt earns: every element's place in the cascade, in the order the Boss reads
- * them. `missing` is a gap no inference was made for, which is every gap in a long prompt.
- */
-function thinPromptNotice(draft: readonly ElementState[]): string {
-	const elements = draft
-		.map(({ element, standing }) => `${element} ${STANDING_WORDS[standing]}`)
-		.join("; ");
-	return `Shaper: thin prompt. ${elements}`;
 }
 
 /** The request the check sends: its instructions and the prompt as typed, with no conversation. */
@@ -270,6 +250,9 @@ function conversationText(messages: readonly unknown[]): string {
 	return lines.reverse().join("\n");
 }
 
+/** One part of the session context: the label the model reads it under, and the source's own words. */
+type SessionSource = { label: string; text: string };
+
 /**
  * The session context the inference may fill from: the repo, the branch, what the project's Beads
  * remember, the conversation so far, and the project's own notes. The branch and the Beads need a
@@ -279,9 +262,12 @@ function conversationText(messages: readonly unknown[]): string {
 type SessionContext = {
 	/** The reading the inference's model gets, one labelled part per source. */
 	text: string;
-	/** The same words without the labels, which is what a fill is judged against. */
-	material: string;
+	/** Every word the session's own sources carry, without the labels: what a fill is judged against. */
+	words: ReadonlySet<string>;
 };
+
+/** A read-only command run in the session's folder, answering what it printed or `undefined`. */
+type SessionRead = (command: string, args: string[]) => Promise<string | undefined>;
 
 /**
  * Run one read-only command in the session's folder and answer what it printed, or `undefined` when
@@ -307,8 +293,8 @@ async function readCommand(
  * The branch the session is on, from git in the session's own folder, or `undefined` when the folder
  * has no repository, git is not installed, or the head is detached and there is no branch to name.
  */
-async function branchOf(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
-	const branch = (await readCommand(pi, "git", ["branch", "--show-current"], cwd))?.trim();
+async function branchOf(read: SessionRead): Promise<string | undefined> {
+	const branch = (await read("git", ["branch", "--show-current"]))?.trim();
 	return branch === undefined || branch === "" ? undefined : branch;
 }
 
@@ -317,8 +303,8 @@ async function branchOf(pi: ExtensionAPI, cwd: string): Promise<string | undefin
  * Beads database. `bd memories --json` is the cheapest read that carries them: the schema version
  * beside the memories is not one of them, and a reply that is not that JSON leaves the source out.
  */
-async function beadsNotes(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
-	const output = await readCommand(pi, "bd", ["memories", "--json"], cwd);
+async function beadsMemories(read: SessionRead): Promise<string | undefined> {
+	const output = await read("bd", ["memories", "--json"]);
 	if (output === undefined) return undefined;
 	let parsed: unknown;
 	try {
@@ -347,24 +333,24 @@ function projectNotes(systemPrompt: string): string | undefined {
 /**
  * What the session already knows, read the one way the inference reads it and judged the one way a
  * fill is judged: the repo it runs in, the branch, what the project's Beads remember, the
- * conversation so far, and the project's own notes.
+ * conversation so far, and the project's own notes. The sources are labelled for the model and their
+ * words are gathered without the labels, so one list feeds both the reading and the check.
  */
 async function sessionContext(pi: ExtensionAPI, ctx: ExtensionContext): Promise<SessionContext> {
 	const repo = ctx.cwd;
-	const branch = await branchOf(pi, repo);
-	const beads = await beadsNotes(pi, repo);
+	const read: SessionRead = (command, args) => readCommand(pi, command, args, repo);
+	const sources: SessionSource[] = [{ label: "Repo", text: repo }];
+	const branch = await branchOf(read);
+	if (branch !== undefined) sources.push({ label: "Branch", text: branch });
+	const beads = await beadsMemories(read);
+	if (beads !== undefined) sources.push({ label: "Beads", text: beads });
 	const conversation = conversationText(ctx.sessionManager.buildSessionProjection().messages);
+	if (conversation !== "") sources.push({ label: "Session so far", text: conversation });
 	const notes = projectNotes(ctx.getSystemPrompt());
-	const parts = [`Repo: ${repo}`];
-	if (branch !== undefined) parts.push(`Branch: ${branch}`);
-	if (beads !== undefined) parts.push(`Beads:\n${beads}`);
-	if (conversation !== "") parts.push(`Session so far:\n${conversation}`);
-	if (notes !== undefined) parts.push(`Project notes:\n${notes}`);
+	if (notes !== undefined) sources.push({ label: "Project notes", text: notes });
 	return {
-		text: parts.join("\n\n"),
-		material: [repo, branch, beads, conversation, notes]
-			.filter((source): source is string => source !== undefined && source !== "")
-			.join("\n"),
+		text: sources.map(({ label, text }) => `${label}:\n${text}`).join("\n\n"),
+		words: new Set(wordsOf(sources.map(({ text }) => text).join("\n"))),
 	};
 }
 
@@ -410,26 +396,29 @@ ${prompt}`;
 
 /**
  * Whether a fill is words the session's own sources carry. Every word of the fill has to be a whole
- * word of the material, so a fill cannot be invented out of a stray substring ("e" inside the
+ * word of the sources, so a fill cannot be invented out of a stray substring ("e" inside the
  * briefing's "receive") and cannot borrow pi's own preamble, which is not one of the sources. The
- * words may come from more than one line of the material, as a model filling from notes does.
+ * words may come from more than one source, as a model filling from notes does.
  */
-function isSessionWords(fill: string, material: string): boolean {
-	const carried = new Set(wordsOf(material));
+function isSessionWords(fill: string, carried: ReadonlySet<string>): boolean {
 	const filled = wordsOf(fill);
 	return filled.length > 0 && filled.every((word) => carried.has(word));
 }
 
 /** What the inference said about one absent element, read against the session's words. */
-function inferenceFor(reported: Record<string, unknown>, element: StandingElement, material: string): Inference {
+function inferenceFor(
+	reported: Record<string, unknown>,
+	element: StandingElement,
+	carried: ReadonlySet<string>,
+): Inference {
 	const entry = reported[element];
 	if (typeof entry !== "object" || entry === null) return "ask";
-	const { filled, scout, ask } = entry as { filled?: unknown; scout?: unknown; ask?: unknown };
+	const { filled, scout } = entry as { filled?: unknown; scout?: unknown };
 	// A fill the session's words do not carry is no fill: the entry falls through to its mark, and to a
-	// question when it names no place, so an invented answer can never fill an element.
-	if (typeof filled === "string" && isSessionWords(filled, material)) return { filled: filled.trim() };
+	// question when it names no place, so an invented answer can never fill an element. An entry that
+	// carries only a question reaches the same mark.
+	if (typeof filled === "string" && isSessionWords(filled, carried)) return { filled: filled.trim() };
 	if (typeof scout === "string" && scout.trim() !== "") return "scout";
-	if (typeof ask === "string" && ask.trim() !== "") return "ask";
 	return "ask";
 }
 
@@ -437,27 +426,27 @@ function inferenceFor(reported: Record<string, unknown>, element: StandingElemen
  * Ask the session's own model to fill the prompt's absent elements from what the session knows. One
  * call answers for all of them, and each answer is read against the session's own words, so what
  * comes back is either a fill from those words, a place to look, or a question. A model that cannot
- * be reached or a reply that is not one JSON object answers `undefined`, leaving every absent
- * element missing.
+ * be reached or a reply that is not one JSON object decides nothing, leaving every absent element a
+ * plain gap.
  */
 async function inferAbsent(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	prompt: string,
 	absent: readonly StandingElement[],
-): Promise<Map<StandingElement, Inference> | undefined> {
+): Promise<Map<StandingElement, Inference>> {
 	const session = await sessionContext(pi, ctx);
 	const reply = await askModel(ctx, inferContext(prompt, session.text, absent));
 	const reported = reply === undefined ? undefined : readJsonObject(reply);
-	if (reported === undefined) return undefined;
-	return new Map(absent.map((element) => [element, inferenceFor(reported, element, session.material)]));
+	if (reported === undefined) return new Map();
+	return new Map(absent.map((element) => [element, inferenceFor(reported, element, session.words)]));
 }
 
 /**
  * The state of every standing element after the check and the inference: present in the prompt,
  * filled from the session, or a gap carrying the inference's mark.
  */
-function draftOf(
+function statesOf(
 	report: readonly ElementReport[],
 	decisions?: ReadonlyMap<StandingElement, Inference>,
 ): ElementState[] {
@@ -471,13 +460,35 @@ function draftOf(
 	});
 }
 
-/** The fills a draft carries, one per filled element, ready for the reshape. */
-function fillsOf(draft: readonly ElementState[]): Partial<ShapeFields> {
-	const fills: Partial<ShapeFields> = {};
-	for (const state of draft) {
-		if (state.standing === "filled") fills[state.element] = state.words;
-	}
-	return fills;
+/** Whether an element is still a gap: neither carried by the prompt nor filled from the session. */
+const isGap = (state: ElementState): boolean => state.standing !== "present" && state.standing !== "filled";
+
+/** One standing element the session fills, and the session's own words it fills the element with. */
+type Fill = { element: StandingElement; words: string };
+
+/** The fills a prompt's state carries, ready for the reshape and the notice. */
+function fillsOf(states: readonly ElementState[]): Fill[] {
+	return states.flatMap((state) =>
+		state.standing === "filled" ? [{ element: state.element, words: state.words }] : [],
+	);
+}
+
+/** The phrase each standing element's place in the cascade gets in the notice. */
+const STANDING_PHRASES: Record<ElementState["standing"], string> = {
+	present: "present",
+	filled: "filled from the session",
+	missing: "missing",
+	scout: "marked for the scout",
+	ask: "marked for a question",
+};
+
+/**
+ * The notice a thin prompt earns: every element's place in the cascade, in the order the Boss reads
+ * them. `missing` is a gap no inference was made for, which is every gap in a long prompt.
+ */
+function thinPromptNotice(states: readonly ElementState[]): string {
+	const elements = states.map(({ element, standing }) => `${element} ${STANDING_PHRASES[standing]}`).join("; ");
+	return `Shaper: thin prompt. ${elements}`;
 }
 
 /**
@@ -495,7 +506,7 @@ const isShort = (prompt: string): boolean => wordCount(prompt) <= SHORT_PROMPT_M
 
 /**
  * The first line of the reshape's instructions, so a provider that stands in for the session's
- * model can tell the reshape from the check and the prompt's own run
+ * model can tell the reshape from the check, the inference and the prompt's own run
  * (tests/fixtures/shaper-test-provider.ts).
  */
 const RESHAPE_MARK = "You are the Shaper's reshape.";
@@ -510,6 +521,15 @@ const SHAPE_WORD_CAP = 250;
 /** The reshape's word budget: three times the prompt's words, or 250, whichever is smaller. */
 const reshapeCap = (prompt: string): number => Math.min(wordCount(prompt) * 3, SHAPE_WORD_CAP);
 
+/** Which standing elements the session already fills, and which are the model's to place. */
+type ShapePlan = { filled: readonly StandingElement[]; toPlace: readonly StandingElement[] };
+
+/** Split a prompt's standing elements into the session's fills and the ones left to the model. */
+function planOf(fills: readonly Fill[]): ShapePlan {
+	const filled = fills.map(({ element }) => element);
+	return { filled, toPlace: STANDING_ELEMENTS.filter((element) => !filled.includes(element)) };
+}
+
 /**
  * What the Shaper asks the session's own model: reorganize one short prompt under the four
  * standing headers without changing what it asks for. The Boss's own words are the contract: every
@@ -518,16 +538,15 @@ const reshapeCap = (prompt: string): number => Math.min(wordCount(prompt) * 3, S
  * The length cap is `min(3 x the prompt's words, 250)`, borrowed from Kiro's contract (pp-csw), so
  * the reshape cannot balloon past what the Boss asked for.
  */
-const reshapeInstructions = (prompt: string, filled: readonly StandingElement[]): string => {
+const reshapeInstructions = (prompt: string, plan: ShapePlan): string => {
 	const budget = reshapeCap(prompt);
 	// The session's fills are not answered by the model: they are the session's own words, and the
 	// Shaper keeps them rather than letting a reshape reword or drop them.
-	const answered = STANDING_ELEMENTS.filter((element) => !filled.includes(element));
 	const filledNote =
-		filled.length === 0
+		plan.filled.length === 0
 			? ""
 			: `
-The session already fills ${filled.join(", ")} with its own words. Answer only ${answered.join(", ")}:
+The session already fills ${plan.filled.join(", ")} with its own words. Answer only ${plan.toPlace.join(", ")}:
 those elements are not yours, and the shape keeps the session's words for them.
 `;
 	return `${RESHAPE_MARK}
@@ -544,7 +563,7 @@ ${SHAPE_WORD_CAP}, whichever is smaller.
 
 Answer with one JSON object and nothing else, one string per element you answer:
 
-{${answered.map((element) => `"${element}": "..."`).join(", ")}}`;
+{${plan.toPlace.map((element) => `"${element}": "..."`).join(", ")}}`;
 };
 
 /** The four fields of a reshape, one per standing element. */
@@ -605,44 +624,50 @@ function sameWords(left: string, right: string): boolean {
 }
 
 /** The request the reshape sends: its instructions, and the prompt as typed, with no conversation. */
-function reshapeContext(prompt: string, filled: readonly StandingElement[]): Context {
+function reshapeContext(prompt: string, plan: ShapePlan): Context {
 	return {
-		systemPrompt: reshapeInstructions(prompt, filled),
+		systemPrompt: reshapeInstructions(prompt, plan),
 		messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 	};
 }
 
 /**
+ * Whether the session's fills and the model's answers together carry every standing element, so the
+ * shape can be rendered. The one place the partial record is proved complete, so no caller casts.
+ */
+function isCompleteShape(fields: Partial<ShapeFields>): fields is ShapeFields {
+	return STANDING_ELEMENTS.every((element) => typeof fields[element] === "string");
+}
+
+/**
  * Ask the session's own model to reorganize one short prompt under the headers, with the elements
  * the session already fills kept as the session's words, and render the result. A missing model, a
- * failed call, a reply that does not carry a field for every element the prompt supplies, a
+ * failed call, a reply that does not carry a field for every element the model was asked for, a
  * reshape that changes the words it was given, or a reshape past the length cap answers `undefined`,
  * so the caller leaves the prompt to go on as typed.
  */
 async function reshape(
 	ctx: ExtensionContext,
 	prompt: string,
-	fills: Partial<ShapeFields>,
+	fills: readonly Fill[],
 ): Promise<string | undefined> {
-	const filled = STANDING_ELEMENTS.filter((element) => fills[element] !== undefined);
-	const asked = STANDING_ELEMENTS.filter((element) => fills[element] === undefined);
-	const fields: Partial<ShapeFields> = { ...fills };
+	const plan = planOf(fills);
+	const fields: Partial<ShapeFields> = {};
+	for (const { element, words } of fills) fields[element] = words;
 	// With every element filled from the session there is nothing for the model to place, and the
 	// shape is the session's words alone.
-	if (asked.length > 0) {
-		const reply = await askModel(ctx, reshapeContext(prompt, filled));
-		const answered = reply === undefined ? undefined : readShapeFields(reply, asked);
+	if (plan.toPlace.length > 0) {
+		const reply = await askModel(ctx, reshapeContext(prompt, plan));
+		const answered = reply === undefined ? undefined : readShapeFields(reply, plan.toPlace);
 		if (answered === undefined) return undefined;
 		Object.assign(fields, answered);
 	}
-	const complete = STANDING_ELEMENTS.map((element) => fields[element]);
-	if (complete.some((text) => text === undefined)) return undefined;
-	const all = complete as string[];
+	if (!isCompleteShape(fields)) return undefined;
 	// The words are the contract: the fields together carry every word of the prompt and of the
 	// session's fills, and no other, so a reshape cannot quietly add, drop or reword anything.
-	const supplied = [prompt, ...filled.map((element) => fills[element] as string)].join(" ");
-	if (!sameWords(all.join(" "), supplied)) return undefined;
-	const shaped = renderShape(fields as ShapeFields);
+	const supplied = [prompt, ...fills.map(({ words }) => words)].join(" ");
+	if (!sameWords(STANDING_ELEMENTS.map((element) => fields[element]).join(" "), supplied)) return undefined;
+	const shaped = renderShape(fields);
 	return wordCount(shaped) <= reshapeCap(prompt) ? shaped : undefined;
 }
 
@@ -650,8 +675,9 @@ async function reshape(
 const REVERT_KEY = "alt+r";
 
 /** The notice after a reshape, naming the elements the session filled when it filled any. */
-function shapeNotice(filled: readonly StandingElement[]): string {
-	const fromSession = filled.length === 0 ? "" : ` ${filled.join(", ")} filled from the session.`;
+function shapeNotice(fills: readonly Fill[]): string {
+	const fromSession =
+		fills.length === 0 ? "" : ` ${fills.map(({ element }) => element).join(", ")} filled from the session.`;
 	return `Shaper: shaped.${fromSession} ${REVERT_KEY} restores your words.`;
 }
 
@@ -705,27 +731,26 @@ export default function shaper(pi: ExtensionAPI): void {
 		// A shape has to be short in this slice, so a long prompt's gaps get no inference: the reshape
 		// could not carry a fill anywhere. Its elements are reported and it goes on as typed.
 		if (!isShort(event.text)) {
-			if (absent.length > 0) ctx.ui.notify(thinPromptNotice(draftOf(report)), "info");
+			if (absent.length > 0) ctx.ui.notify(thinPromptNotice(statesOf(report)), "info");
 			return { action: "continue" };
 		}
 		// The cascade's first step: the session fills what it knows, and every gap it cannot fill is
 		// marked for the scout or for a question. The inference reads the repo, the branch, the project's
 		// Beads, the conversation and the project's notes, not just the prompt.
 		const decisions = absent.length === 0 ? undefined : await inferAbsent(pi, ctx, event.text, absent);
-		const draft = draftOf(report, decisions);
+		const states = statesOf(report, decisions);
 		// A prompt that still has a gap is reported element by element and goes on as typed.
-		if (draft.some(({ standing }) => standing !== "present" && standing !== "filled")) {
-			ctx.ui.notify(thinPromptNotice(draft), "info");
+		if (states.some(isGap)) {
+			ctx.ui.notify(thinPromptNotice(states), "info");
 			return { action: "continue" };
 		}
-		const fills = fillsOf(draft);
+		const fills = fillsOf(states);
 		const shaped = await reshape(ctx, event.text, fills);
 		if (shaped === undefined) return { action: "continue" };
 		// The reshape waits in the editor for the Boss; returning handled keeps it from sending itself.
 		pending = { original: event.text, shaped };
 		ctx.ui.setEditorText(shaped);
-		const filled = draft.flatMap((state) => (state.standing === "filled" ? [state.element] : []));
-		ctx.ui.notify(shapeNotice(filled), "info");
+		ctx.ui.notify(shapeNotice(fills), "info");
 		return { action: "handled" };
 	});
 }
