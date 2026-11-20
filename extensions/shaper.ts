@@ -4,10 +4,11 @@
  * This slice is the cascade's first step, inference. With shaping on, the Shaper asks the session's
  * own model which of the four standing elements a typed prompt carries: goal, context, constraints
  * and done-when (see GLOSSARY.md). A short prompt that leaves an element missing has the absent
- * ones filled from what the session already knows (the repo, the conversation so far, and the
- * session's own briefing), and each gap the session cannot fill is marked for the scout, where the
- * answer can be looked up, or for a question, where it cannot. Nothing is invented: a fill survives
- * only when its words come from the session itself. A short prompt whose four elements are then all
+ * ones filled from what the session already knows (the repo, the branch, what the project's Beads
+ * remember, the conversation so far and the project's own notes), and each gap the session cannot
+ * fill is marked for the scout, where the answer can be looked up, or for a question, where it
+ * cannot. Nothing is invented: a fill survives only when every word of it is a word the session
+ * itself carries. A short prompt whose four elements are then all
  * there is reshaped: words moved under the four headers, put in the editor for the Boss to accept
  * or edit, never sent by itself. The original is kept, and one press of `alt+r` puts it back in the
  * editor. A prompt that still has a gap is reported element by element and goes on as typed.
@@ -215,8 +216,17 @@ const SESSION_CONTEXT_MAX_CHARS = 5000;
 /** The most messages of the session's conversation the inference reads. */
 const SESSION_CONTEXT_MAX_MESSAGES = 8;
 
-/** The most characters of the session's briefing, its system prompt, the inference reads. */
-const BRIEFING_MAX_CHARS = 6000;
+/** The most characters of the project's Beads memories the inference reads. */
+const BEADS_MAX_CHARS = 4000;
+
+/** The most characters of the project's own notes the inference reads. */
+const PROJECT_NOTES_MAX_CHARS = 6000;
+
+/**
+ * How long one shell read may take before the inference goes without that source. The reads are
+ * extras beside the prompt, so a slow repository costs the inference its branch, never the prompt.
+ */
+const LOOKUP_TIMEOUT_MS = 2000;
 
 /** The text one session message carries: its string content, or the text parts of its content. */
 function messageText(content: unknown): string {
@@ -261,30 +271,108 @@ function conversationText(messages: readonly unknown[]): string {
 }
 
 /**
- * The session context the inference may fill from: the repo, the conversation so far, and the
- * session's briefing, which carries the project's instructions and the notes pi loads at session
- * start (AGENTS.md, Beads). The briefing keeps its tail: pi renders its own tools and rules first
- * and the project's sections after them, so the end is where what this project knows lives. The
- * branch is not here: pi exposes it only to a footer render, and looking it up is the scout's work
- * (pi-shaper-73v.4).
+ * The session context the inference may fill from: the repo, the branch, what the project's Beads
+ * remember, the conversation so far, and the project's own notes. The branch and the Beads need a
+ * shell read in the session's folder, so gathering the context is a task rather than a string, and
+ * each read that fails leaves its source out instead of failing the prompt.
  */
-function sessionContext(ctx: ExtensionContext): string {
-	const parts = [`Repo: ${ctx.cwd}`];
-	const conversation = conversationText(ctx.sessionManager.buildSessionProjection().messages);
-	if (conversation !== "") parts.push(`Session so far:\n${conversation}`);
-	const briefing = ctx.getSystemPrompt().trim();
-	if (briefing !== "") {
-		const tail = briefing.slice(-BRIEFING_MAX_CHARS);
-		parts.push(`Session briefing:\n${tail}`);
+type SessionContext = {
+	/** The reading the inference's model gets, one labelled part per source. */
+	text: string;
+	/** The same words without the labels, which is what a fill is judged against. */
+	material: string;
+};
+
+/**
+ * Run one read-only command in the session's folder and answer what it printed, or `undefined` when
+ * it cannot run: a binary that is not installed, a timeout, a non-zero exit and a throw all leave
+ * the source out. The reads are extras beside the prompt, so one that fails costs the inference a
+ * source and never the prompt.
+ */
+async function readCommand(
+	pi: ExtensionAPI,
+	command: string,
+	args: string[],
+	cwd: string,
+): Promise<string | undefined> {
+	try {
+		const { code, stdout } = await pi.exec(command, args, { cwd, timeout: LOOKUP_TIMEOUT_MS });
+		return code === 0 ? stdout : undefined;
+	} catch {
+		return undefined;
 	}
-	return parts.join("\n\n");
+}
+
+/**
+ * The branch the session is on, from git in the session's own folder, or `undefined` when the folder
+ * has no repository, git is not installed, or the head is detached and there is no branch to name.
+ */
+async function branchOf(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
+	const branch = (await readCommand(pi, "git", ["branch", "--show-current"], cwd))?.trim();
+	return branch === undefined || branch === "" ? undefined : branch;
+}
+
+/**
+ * What the project's Beads remember, one line per memory, or `undefined` when the folder holds no
+ * Beads database. `bd memories --json` is the cheapest read that carries them: the schema version
+ * beside the memories is not one of them, and a reply that is not that JSON leaves the source out.
+ */
+async function beadsNotes(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
+	const output = await readCommand(pi, "bd", ["memories", "--json"], cwd);
+	if (output === undefined) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(output);
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null) return undefined;
+	const lines = Object.entries(parsed as Record<string, unknown>)
+		.filter(([key, value]) => key !== "schema_version" && typeof value === "string")
+		.map(([key, value]) => `- ${key}: ${(value as string).trim()}`);
+	return lines.length === 0 ? undefined : lines.join("\n").slice(0, BEADS_MAX_CHARS);
+}
+
+/**
+ * The project's own notes from the session's system prompt: the `<project_context>` section pi
+ * renders from the folder's instruction files (AGENTS.md and its neighbours). pi renders its tools,
+ * rules and docs before that section and its skills and working folder after it, so the section is
+ * read by its tag, not by its place in the prompt: a long skills list must not push the notes out.
+ */
+function projectNotes(systemPrompt: string): string | undefined {
+	const section = /<project_context>([\s\S]*?)<\/project_context>/.exec(systemPrompt)?.[1]?.trim();
+	return section === undefined || section === "" ? undefined : section.slice(0, PROJECT_NOTES_MAX_CHARS);
+}
+
+/**
+ * What the session already knows, read the one way the inference reads it and judged the one way a
+ * fill is judged: the repo it runs in, the branch, what the project's Beads remember, the
+ * conversation so far, and the project's own notes.
+ */
+async function sessionContext(pi: ExtensionAPI, ctx: ExtensionContext): Promise<SessionContext> {
+	const repo = ctx.cwd;
+	const branch = await branchOf(pi, repo);
+	const beads = await beadsNotes(pi, repo);
+	const conversation = conversationText(ctx.sessionManager.buildSessionProjection().messages);
+	const notes = projectNotes(ctx.getSystemPrompt());
+	const parts = [`Repo: ${repo}`];
+	if (branch !== undefined) parts.push(`Branch: ${branch}`);
+	if (beads !== undefined) parts.push(`Beads:\n${beads}`);
+	if (conversation !== "") parts.push(`Session so far:\n${conversation}`);
+	if (notes !== undefined) parts.push(`Project notes:\n${notes}`);
+	return {
+		text: parts.join("\n\n"),
+		material: [repo, branch, beads, conversation, notes]
+			.filter((source): source is string => source !== undefined && source !== "")
+			.join("\n"),
+	};
 }
 
 /**
  * What the Shaper asks the session's own model: fill the elements one typed prompt lacks from what
  * the session already knows, or say where an answer can be looked up or that only the Boss can
- * answer it. The reply's fills are checked against the session context before they are used, so the
- * model is told the rule, not trusted with it.
+ * answer it. The reply's fills are checked against the session's own words before they are used, so
+ * the model is told the rule, not trusted with it.
  */
 const INFER_INSTRUCTIONS = `${INFER_MARK}
 Fill the standing elements one typed prompt lacks, from what the session already knows. Do not
@@ -292,11 +380,12 @@ rewrite the prompt.
 
 ${ELEMENT_GUIDE}
 
-The session context is the repo, the conversation so far, and the session's briefing. Fill an
-element only with words copied from that context: a fill has to appear in it word for word, and
-nothing else is accepted. When the answer is not in the context but the session says where it
-lives, mark the element for the scout, with the place to look. When neither the answer nor a place
-to look is there, mark it for a question to the Boss.
+The session context is the repo, the branch, what the project's Beads remember, the conversation
+so far, and the project's own notes. Fill an element only with words copied from that context:
+every word of a fill must appear in it, in the same spelling, and nothing else is accepted. When
+the answer is not in the context but the session says where it lives, mark the element for the
+scout, with the place to look. When neither the answer nor a place to look is there, mark it for a
+question to the Boss.
 
 Answer with one JSON object and nothing else, one entry per element the prompt lacks, keyed by the
 element's name, and exactly one of these three forms per entry:
@@ -319,21 +408,26 @@ ${prompt}`;
 	};
 }
 
-/** Text with its whitespace collapsed and its letters lowercased: what "the same words" is judged on. */
-const comparable = (text: string): string => text.trim().replace(/\s+/g, " ").toLowerCase();
-
-/** Whether a fill is words the session already carries, in one stretch of the session context. */
-const isSessionWords = (fill: string, context: string): boolean =>
-	wordsOf(fill).length > 0 && comparable(context).includes(comparable(fill));
+/**
+ * Whether a fill is words the session's own sources carry. Every word of the fill has to be a whole
+ * word of the material, so a fill cannot be invented out of a stray substring ("e" inside the
+ * briefing's "receive") and cannot borrow pi's own preamble, which is not one of the sources. The
+ * words may come from more than one line of the material, as a model filling from notes does.
+ */
+function isSessionWords(fill: string, material: string): boolean {
+	const carried = new Set(wordsOf(material));
+	const filled = wordsOf(fill);
+	return filled.length > 0 && filled.every((word) => carried.has(word));
+}
 
 /** What the inference said about one absent element, read against the session's words. */
-function inferenceFor(reported: Record<string, unknown>, element: StandingElement, context: string): Inference {
+function inferenceFor(reported: Record<string, unknown>, element: StandingElement, material: string): Inference {
 	const entry = reported[element];
 	if (typeof entry !== "object" || entry === null) return "ask";
 	const { filled, scout, ask } = entry as { filled?: unknown; scout?: unknown; ask?: unknown };
 	// A fill the session's words do not carry is no fill: the entry falls through to its mark, and to a
 	// question when it names no place, so an invented answer can never fill an element.
-	if (typeof filled === "string" && isSessionWords(filled, context)) return { filled: filled.trim() };
+	if (typeof filled === "string" && isSessionWords(filled, material)) return { filled: filled.trim() };
 	if (typeof scout === "string" && scout.trim() !== "") return "scout";
 	if (typeof ask === "string" && ask.trim() !== "") return "ask";
 	return "ask";
@@ -341,21 +435,22 @@ function inferenceFor(reported: Record<string, unknown>, element: StandingElemen
 
 /**
  * Ask the session's own model to fill the prompt's absent elements from what the session knows. One
- * call answers for all of them, and each answer is read against the session context, so what comes
- * back is either the session's own words, a place to look, or a question. A model that cannot be
- * reached or a reply that is not one JSON object answers `undefined`, leaving every absent element
- * missing.
+ * call answers for all of them, and each answer is read against the session's own words, so what
+ * comes back is either a fill from those words, a place to look, or a question. A model that cannot
+ * be reached or a reply that is not one JSON object answers `undefined`, leaving every absent
+ * element missing.
  */
 async function inferAbsent(
+	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	prompt: string,
 	absent: readonly StandingElement[],
 ): Promise<Map<StandingElement, Inference> | undefined> {
-	const context = sessionContext(ctx);
-	const reply = await askModel(ctx, inferContext(prompt, context, absent));
+	const session = await sessionContext(pi, ctx);
+	const reply = await askModel(ctx, inferContext(prompt, session.text, absent));
 	const reported = reply === undefined ? undefined : readJsonObject(reply);
 	if (reported === undefined) return undefined;
-	return new Map(absent.map((element) => [element, inferenceFor(reported, element, context)]));
+	return new Map(absent.map((element) => [element, inferenceFor(reported, element, session.material)]));
 }
 
 /**
@@ -614,9 +709,9 @@ export default function shaper(pi: ExtensionAPI): void {
 			return { action: "continue" };
 		}
 		// The cascade's first step: the session fills what it knows, and every gap it cannot fill is
-		// marked for the scout or for a question. The inference reads the repo, the conversation and the
-		// session's briefing, not just the prompt.
-		const decisions = absent.length === 0 ? undefined : await inferAbsent(ctx, event.text, absent);
+		// marked for the scout or for a question. The inference reads the repo, the branch, the project's
+		// Beads, the conversation and the project's notes, not just the prompt.
+		const decisions = absent.length === 0 ? undefined : await inferAbsent(pi, ctx, event.text, absent);
 		const draft = draftOf(report, decisions);
 		// A prompt that still has a gap is reported element by element and goes on as typed.
 		if (draft.some(({ standing }) => standing !== "present" && standing !== "filled")) {

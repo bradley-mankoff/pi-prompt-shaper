@@ -44,15 +44,17 @@ Settings live under a `shaper` key in pi's `settings.json`, either the global fi
 This slice builds the reshape and the cascade's first step, inference. With the setting on, the
 Shaper asks the session's own model which standing elements a typed prompt carries. A short prompt
 (20 words or fewer) that leaves an element missing has the absent ones filled from what the session
-already knows: the repo, the conversation so far, and the notes pi loaded at session start. Each
-gap the session cannot fill is marked for the scout, where the answer can be looked up, or for a
-question, where it cannot. Nothing is invented: a fill is kept only when its words appear in the
-session, and an unsupported fill becomes a gap. A short prompt whose four elements are then all
-there comes back under the four headers, carrying the typed words and the session's fills, in the
-editor. A prompt that still has a gap is reported element by element and goes on exactly as it was
-typed. Nothing is sent until Enter; `alt+r` puts the original words back in the editor. A reshape
-that changes a word or runs past the length cap (`min(3 x the original's words, 250)`) is dropped,
-and the prompt goes on as typed. The default stays silence.
+already knows: the repo and branch it runs in, what the project's Beads remember, the conversation
+so far, and the project's own notes (the `AGENTS.md` files pi loads). Each gap the session cannot
+fill is marked for the scout, where the answer can be looked up, or for a question, where it
+cannot. Nothing is invented: a fill is kept only when every one of its words is a whole word the
+session's own sources carry, and an unsupported fill becomes a gap. A short prompt whose four
+elements are then all there comes back under the four headers, carrying the typed words and the
+session's fills, in the editor. A prompt that still has a gap is reported element by element and
+goes on exactly as it was typed. Nothing is sent until Enter; `alt+r` puts the original words back
+in the editor. A reshape that changes a word or runs past the length cap
+(`min(3 x the original's words, 250)`) is dropped, and the prompt goes on as typed. The default
+stays silence.
 
 ## What the Shaper will do
 
@@ -78,8 +80,9 @@ directory with the installed `pi` command, one with shaping off and one proving 
 prompt still goes on because there is no editor to hold it. The shape tests type a prompt
 in-process with a recorder standing in for the Boss's screen, so they read the Shaper's report and
 the editor the way the Boss does, and press the revert key through pi's shortcut registry. The
-inference tests say something in an earlier turn, then type the thin prompt, so the fill is staged
-in the session the way the Boss stages it. Every test checks what the main model received, what
+inference tests stage the session a fill may come from: an earlier turn for the conversation, a git
+repository with a branch, an `AGENTS.md` for the project's notes, and a `bd` memory for Beads, then
+type the thin prompt. Every test checks what the main model received, what
 the Shaper said, what it asked the session's model to do, or what it left in the editor, never how
 the extension is built.
 
