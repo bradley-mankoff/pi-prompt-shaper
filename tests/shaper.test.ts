@@ -1,11 +1,11 @@
 /**
  * The seam the Bead's Spec names: a real pi session that loads the Shaper, with a test provider
  * at the provider edge playing the session's own model. A test types a prompt the way the Boss
- * does and checks what the main model received and what the Shaper told the Boss; it never reads
- * inside the extension.
+ * does, presses the shortcut the Boss presses, and checks what the main model received, what the
+ * Shaper told the Boss, and what it left in the editor; it never reads inside the extension.
  *
  * The first test runs pi's SDK in-process and gives the loader the package directory, so the
- * extension it reports is the one the package manifest names. The second drives the installed
+ * extension it reports is the one the package manifest names. The next two drive the installed
  * `pi` command with the package directory, as `pi install` will.
  */
 import assert from "node:assert/strict";
@@ -47,6 +47,72 @@ const NO_CONSTRAINTS =
 const NO_DONE_WHEN =
 	"In src/queue.ts, raise the retry limit from 3 to 5 because the flaky integration job needs it, and keep the public API unchanged.";
 
+/**
+ * A short prompt carrying all four standing elements in the Boss's rushed prose: the prompt this
+ * slice reshapes. It is 19 words, under the Shaper's line for a short prompt.
+ */
+const SHORT_COMPLETE =
+	"In src/queue.ts, rename recieve to receive, keep the JSON shape the CLI tests parse, and done when tests/queue.test.ts passes.";
+
+/** The reshape the session's model gives SHORT_COMPLETE, as the test provider's canned reply. */
+const SHAPED_FIELDS = JSON.stringify({
+	goal: "rename recieve to receive",
+	context: "In src/queue.ts",
+	constraints: "keep the JSON shape the CLI tests parse",
+	"done-when": "and done when tests/queue.test.ts passes",
+});
+
+/** The shaped prompt the Boss sees in the editor: four headers carrying the original's words. */
+const SHAPED = `## Goal
+rename recieve to receive
+
+## Context
+In src/queue.ts
+
+## Constraints
+keep the JSON shape the CLI tests parse
+
+## Done-when
+and done when tests/queue.test.ts passes`;
+
+/**
+ * A reshape that bursts the cap: the original's 19 words plus 40, and the headers, 67 words against
+ * a 57-word cap.
+ */
+const OVER_LONG_FIELDS = JSON.stringify({
+	goal: `rename recieve to receive ${"always ".repeat(40).trim()}`,
+	context: "In src/queue.ts",
+	constraints: "keep the JSON shape the CLI tests parse",
+	"done-when": "and done when tests/queue.test.ts passes",
+});
+
+/** A reshape inside the cap that adds a word the Boss never typed: "now". */
+const CHANGED_FIELDS = JSON.stringify({
+	goal: "rename recieve to receive now",
+	context: "In src/queue.ts",
+	constraints: "keep the JSON shape the CLI tests parse",
+	"done-when": "and done when tests/queue.test.ts passes",
+});
+
+/**
+ * The reshape a model would give NO_CONTEXT if the Shaper asked for one: its 19 words split across
+ * the four fields. It is valid in length and in words, so only the missing context stands between
+ * that prompt and a reshape.
+ */
+const NO_CONTEXT_FIELDS = JSON.stringify({
+	goal: "Add a retry limit to",
+	context: "the queue",
+	constraints: "keep the public API unchanged",
+	"done-when": "and done when the limit is tested",
+});
+
+/** A valid one-pixel PNG, enough for pi to treat a typed prompt as carrying an image. */
+const IMAGE = {
+	type: "image" as const,
+	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+	mimeType: "image/png",
+};
+
 /** The standing elements every typed prompt is checked for, as GLOSSARY.md names them. */
 const STANDING_ELEMENTS = ["goal", "context", "constraints", "done-when"] as const;
 
@@ -54,13 +120,17 @@ const STANDING_ELEMENTS = ["goal", "context", "constraints", "done-when"] as con
 const SHAPING_ON = { shaper: { enabled: true } };
 
 /**
- * One temporary Mac: a HOME, an agent folder pi reads its settings from, the test provider's log,
- * and, when a test names one, the element report the session's model gives the Shaper's check.
+ * How the session's model answers the Shaper's two calls: the element report the check receives,
+ * and the fields the reshape receives. A test that names neither gets the check's all-present
+ * default and a reshape reply the Shaper must refuse.
  */
-type Workspace = { dir: string; home: string; agentDir: string; log: string; check?: string };
+type WorkspaceOptions = { settings?: Record<string, unknown>; check?: string; reshape?: string };
 
-/** What a test sets up before pi runs: its settings, and the report the check's model gives. */
-type WorkspaceOptions = { settings?: Record<string, unknown>; check?: string };
+/**
+ * One temporary Mac: a HOME, an agent folder pi reads its settings from, the test provider's log,
+ * and, when a test names them, the answers the session's model gives the Shaper's two calls.
+ */
+type Workspace = { dir: string; home: string; agentDir: string; log: string; check?: string; reshape?: string };
 
 /** Every workspace this file made, removed once its tests are done. */
 const workspaces: Workspace[] = [];
@@ -81,7 +151,7 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 	// missing file stays a fault instead of answering the same as no request.
 	writeFileSync(log, "");
 	if (options.settings !== undefined) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
-	const workspace = { dir, home, agentDir, log, check: options.check };
+	const workspace = { dir, home, agentDir, log, check: options.check, reshape: options.reshape };
 	workspaces.push(workspace);
 	return workspace;
 }
@@ -100,27 +170,27 @@ const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	PI_TELEMETRY: "0",
 	SHAPER_TEST_LOG: workspace.log,
 	...(workspace.check === undefined ? {} : { SHAPER_TEST_CHECK_REPORT: workspace.check }),
+	...(workspace.reshape === undefined ? {} : { SHAPER_TEST_RESHAPE_REPORT: workspace.reshape }),
 });
 
 /**
- * Run something with the workspace's environment in place: a temporary HOME and agent folder,
- * which pi's auth storage and settings read, and the test provider's log. The environment is
- * restored afterwards, so a later test starts clean even though the process is shared.
+ * Put the workspace's environment in place: a temporary HOME and agent folder, which pi's auth
+ * storage and settings read, and the test provider's log and canned replies. The returned
+ * function restores the environment, so a later test starts clean even though the process is
+ * shared.
  */
-async function withPiEnvironment<T>(workspace: Workspace, run: () => Promise<T>): Promise<T> {
+function applyPiEnvironment(workspace: Workspace): () => void {
 	const saved = { ...process.env };
 	for (const [key, value] of Object.entries(piEnv(workspace))) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
 	}
-	try {
-		return await run();
-	} finally {
+	return () => {
 		for (const key of Object.keys(process.env)) {
 			if (!(key in saved)) delete process.env[key];
 		}
 		Object.assign(process.env, saved);
-	}
+	};
 }
 
 /** What pi's resource loader reports it loaded: the extensions, and any extension that failed to load. */
@@ -139,10 +209,17 @@ type PiSdk = {
 
 /** The session operations the in-process tests use. */
 type SdkSession = {
-	prompt(text: string): Promise<void>;
+	prompt(text: string, options?: { images?: SdkImage[] }): Promise<void>;
 	bindExtensions(bindings: { uiContext: ExtensionUIContext; mode: "tui" }): Promise<void>;
+	extensionRunner: {
+		getShortcuts(keybindings: Record<string, unknown>): Map<string, { handler(ctx: unknown): void | Promise<void> }>;
+		createContext(): unknown;
+	};
 	dispose(): void;
 };
+
+/** An image as pi's prompt carries one; a test that attaches one only needs the shape. */
+type SdkImage = { type: "image"; data: string; mimeType: string };
 
 /** The session's own model, as the test provider registers it. */
 const MAIN_MODEL = {
@@ -181,7 +258,7 @@ const loadPiSdk = (): Promise<PiSdk> =>
 	(piSdk ??= import(pathToFileURL(join(piPackageRoot(), "dist", "index.js")).href).then((module) => module as PiSdk));
 
 /** One request the test provider saw, as it wrote it to the log. */
-type Request = { provider: string; model: string; check: boolean; system: string; messages: string[] };
+type Request = { provider: string; model: string; kind: "main" | "check" | "reshape"; system: string; messages: string[] };
 
 /** Every request the test provider wrote, in order. */
 function requests(workspace: Workspace): Request[] {
@@ -193,12 +270,17 @@ function requests(workspace: Workspace): Request[] {
 
 /** Every request the Shaper sent the session's model to check a prompt's standing elements. */
 function checkRequests(workspace: Workspace): Request[] {
-	return requests(workspace).filter(({ check }) => check);
+	return requests(workspace).filter(({ kind }) => kind === "check");
 }
 
-/** Every request the session's own model answered for the prompt itself, not for the element check. */
+/** Every request the Shaper sent the session's model to reshape a prompt. */
+function reshapeRequests(workspace: Workspace): Request[] {
+	return requests(workspace).filter(({ kind }) => kind === "reshape");
+}
+
+/** Every request the session's own model answered for the prompt itself, not for the Shaper's calls. */
 function mainRequests(workspace: Workspace): Request[] {
-	return requests(workspace).filter(({ check }) => !check);
+	return requests(workspace).filter(({ kind }) => kind === "main");
 }
 
 /** One notice the Shaper showed the Boss through pi's UI. */
@@ -208,20 +290,36 @@ type Notice = { message: string; type?: "info" | "warning" | "error" };
 type SessionReadings = { notices: Notice[]; loaded: LoadedExtensions };
 
 /**
- * Type one prompt into a real pi session that loads the package, with the Boss's screen standing
- * in at the UI edge, and return what the session leaves a test to read: the notices the Shaper
- * showed the Boss and the extensions pi loaded from the package directory. What the session's
- * model was asked stays in the test provider's log. The environment is swapped for the session
- * and restored afterwards, so a later test starts clean even though the process is shared.
+ * A real pi session that loads the package, with the Boss's screen standing in at the UI edge, kept
+ * open for a test's steps: typing, pressing a key, and reading the editor the Boss would see.
  */
-async function promptInSession(workspace: Workspace, text: string): Promise<SessionReadings> {
+type OpenSession = SessionReadings & {
+	prompt(text: string, images?: SdkImage[]): Promise<void>;
+	editorText(): string;
+	press(key: string): Promise<void>;
+	dispose(): void;
+};
+
+/**
+ * Open a real pi session that loads the package. The UI stand-in records the notices the Shaper
+ * shows and the editor it sets, and it keeps the workspace's environment in place because the test
+ * provider reads its canned replies at request time. The caller disposes the session, which
+ * restores the environment.
+ */
+async function openSession(workspace: Workspace): Promise<OpenSession> {
 	const notices: Notice[] = [];
-	// pi types the whole UI port; only the notice is implemented because it is the one UI the Shaper
-	// uses in this slice, so the cast avoids a stand-in full of no-ops. The next slice adds the editor.
+	let editor = "";
+	// pi types the whole UI port; only the three calls the Shaper uses are implemented, so the cast
+	// avoids a stand-in full of no-ops. The notices and the editor text are what the Boss would read.
 	const ui = {
 		notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }),
+		setEditorText: (text: string) => {
+			editor = text;
+		},
+		getEditorText: () => editor,
 	} as unknown as ExtensionUIContext;
-	const loaded = await withPiEnvironment(workspace, async () => {
+	const restore = applyPiEnvironment(workspace);
+	try {
 		const sdk = await loadPiSdk();
 		const loader = new sdk.DefaultResourceLoader({
 			cwd: workspace.dir,
@@ -234,7 +332,7 @@ async function promptInSession(workspace: Workspace, text: string): Promise<Sess
 			noContextFiles: true,
 		});
 		await loader.reload();
-		const extensions = loader.getExtensions();
+		const loaded = loader.getExtensions();
 		const { session } = await sdk.createAgentSession({
 			cwd: workspace.dir,
 			agentDir: workspace.agentDir,
@@ -245,13 +343,58 @@ async function promptInSession(workspace: Workspace, text: string): Promise<Sess
 		});
 		try {
 			await session.bindExtensions({ uiContext: ui, mode: "tui" });
-			await session.prompt(text);
-		} finally {
+		} catch (error) {
 			session.dispose();
+			throw error;
 		}
-		return extensions;
+		return {
+			notices,
+			loaded,
+			// The TUI clears the editor when the Boss submits, so the stand-in does too; the Shaper's own
+			// setEditorText call puts the shaped text back before the prompt returns handled.
+			prompt: (text, images) => {
+				editor = "";
+				return session.prompt(text, { images });
+			},
+			editorText: () => editor,
+			// Press one key the way the TUI does: through the shortcut the extension registered, with pi's
+			// own context for the session.
+			press: async (key) => {
+				const shortcut = session.extensionRunner.getShortcuts({}).get(key);
+				if (shortcut === undefined) throw new Error(`no extension registered the ${key} shortcut`);
+				await shortcut.handler(session.extensionRunner.createContext());
+			},
+			dispose: () => {
+				session.dispose();
+				restore();
+			},
+		};
+	} catch (error) {
+		restore();
+		throw error;
+	}
+}
+
+/** Run a test's steps against one open session, and dispose it whichever way they end. */
+async function withSession<T>(workspace: Workspace, run: (session: OpenSession) => Promise<T>): Promise<T> {
+	const session = await openSession(workspace);
+	try {
+		return await run(session);
+	} finally {
+		session.dispose();
+	}
+}
+
+/**
+ * Type one prompt into a real pi session that loads the package, and return what the session
+ * leaves a test to read: the notices the Shaper showed the Boss and the extensions pi loaded from
+ * the package directory. What the session's model was asked stays in the test provider's log.
+ */
+async function promptInSession(workspace: Workspace, text: string): Promise<SessionReadings> {
+	return withSession(workspace, async (session) => {
+		await session.prompt(text);
+		return { notices: session.notices, loaded: session.loaded };
 	});
-	return { notices, loaded };
 }
 
 /** Run the installed pi with the package directory and one typed prompt. */
@@ -271,7 +414,7 @@ test("the package loads the Shaper extension, and with shaping off by default th
 		loaded.extensions.some(({ sourceInfo }) => realpathSync(sourceInfo.path) === realpathSync(extension)),
 		"the Shaper extension is one of the extensions pi loaded",
 	);
-	const main = requests(workspace);
+	const main = mainRequests(workspace);
 	assert.equal(main.length, 1, "the prompt reached the main model once");
 	assert.equal(main[0].messages.at(-1), THIN, "the main model received the words the Boss typed and nothing else");
 });
@@ -280,9 +423,18 @@ test("pi loads the package directory, and with shaping off by default the typed 
 	const workspace = makeWorkspace();
 	const result = runPi(workspace, THIN);
 	assert.equal(result.status, 0, result.stderr);
-	const main = requests(workspace).filter((request) => request.provider === "shaper-test");
+	const main = mainRequests(workspace);
 	assert.equal(main.length, 1, "the prompt reached the main model once");
 	assert.equal(main[0].messages.at(-1), THIN, "the main model received the words the Boss typed and nothing else");
+});
+
+test("with shaping on, a print-mode prompt still reaches the main model, because there is no editor to hold it", () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	const result = runPi(workspace, SHORT_COMPLETE);
+	assert.equal(result.status, 0, result.stderr);
+	const main = mainRequests(workspace);
+	assert.equal(main.length, 1, "the prompt reached the main model once");
+	assert.equal(main[0].messages.at(-1), SHORT_COMPLETE, "the main model received the words the Boss typed");
 });
 
 test("a thin prompt engages the Shaper, which reports each standing element as present or missing", async () => {
@@ -303,13 +455,14 @@ test("a thin prompt engages the Shaper, which reports each standing element as p
 	);
 });
 
-test("a complete typed prompt passes through untouched, and the Shaper says nothing", async () => {
+test("a long complete typed prompt passes through untouched, and the Shaper says nothing", async () => {
 	const workspace = makeWorkspace({ settings: SHAPING_ON });
 	const { notices } = await promptInSession(workspace, COMPLETE);
 	const main = mainRequests(workspace);
 	assert.equal(main.length, 1, "the prompt reached the main model once");
 	assert.equal(main[0].messages.at(-1), COMPLETE, "the main model received the words the Boss typed and nothing else");
 	assert.deepEqual(notices, [], "the Boss was told nothing, because every element was present");
+	assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a long complete prompt");
 });
 
 test("a prompt missing its goal reports the goal missing and the other standing elements present", async () => {
@@ -361,7 +514,10 @@ test("a prompt missing its done-when reports the done-when missing and the other
 });
 
 test("the Shaper asks the session's own model about every standing element, reading the prompt as typed", async () => {
-	const workspace = makeWorkspace({ settings: SHAPING_ON });
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: '{"goal":true,"context":false,"constraints":false,"done-when":false}',
+	});
 	await promptInSession(workspace, THIN);
 	const [check, ...extra] = checkRequests(workspace);
 	assert.equal(extra.length, 0, "the Shaper checked the prompt once");
@@ -381,4 +537,147 @@ test("a check the Shaper cannot read leaves the prompt to go on as typed, and th
 		THIN,
 		"the main model received the words the Boss typed and nothing else",
 	);
+});
+
+test("a short typed prompt that carries every standing element comes back under the four headers in the editor", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		assert.equal(session.editorText(), SHAPED, "the editor holds the prompt reorganized under the four headers");
+		assert.equal(mainRequests(workspace).length, 0, "nothing the Boss did not accept reached the main model");
+	});
+});
+
+test("the Shaper asks for a reshape from the session's own model, with the Boss's words and the length cap", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		const [call, ...extra] = reshapeRequests(workspace);
+		assert.equal(extra.length, 0, "the Shaper asked for one reshape");
+		assert.equal(call.model, "main", "the reshape runs on the session's own model");
+		assert.equal(call.messages.at(-1), SHORT_COMPLETE, "the reshape read the prompt the Boss typed");
+		for (const element of STANDING_ELEMENTS) {
+			assert.ok(call.system.includes(`${element}:`), `the reshape asks about the standing element ${element}`);
+		}
+		assert.ok(call.system.includes("add no requirement"), "the reshape is told to invent nothing the Boss did not name");
+		assert.ok(call.system.includes("at most 57 words"), "the reshape is told the cap: three times the prompt's 19 words");
+	});
+});
+
+test("pressing enter on the shaped prompt sends the shaped text to the main model", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		await session.prompt(session.editorText());
+		const main = mainRequests(workspace);
+		assert.equal(main.length, 1, "the shaped prompt reached the main model once");
+		assert.equal(main[0].messages.at(-1), SHAPED, "the main model received the shaped text the Boss accepted");
+		assert.equal(checkRequests(workspace).length, 1, "the Shaper checked the original once, not its own shaped text");
+	});
+});
+
+test("an edited shaped prompt goes on exactly as the Boss edited it", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		const edited = `${SHAPED}\n\nAlso keep the docs in step.`;
+		await session.prompt(edited);
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			edited,
+			"the main model received the prompt as the Boss edited it",
+		);
+	});
+});
+
+test("one press of the revert shortcut puts the original words back in the editor", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		await session.press("alt+r");
+		assert.equal(session.editorText(), SHORT_COMPLETE, "the editor holds the Boss's words again");
+	});
+});
+
+test("the original restored by revert goes on as the Boss typed it, without another reshape", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		await session.press("alt+r");
+		await session.prompt(session.editorText());
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_COMPLETE,
+			"the main model received the Boss's own words",
+		);
+		assert.equal(reshapeRequests(workspace).length, 1, "the reverted prompt was not reshaped a second time");
+	});
+});
+
+test("a reshape past the length cap never reaches the editor, and the prompt goes on as typed", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: OVER_LONG_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		assert.equal(session.editorText(), "", "the editor stays empty, so the over-long reshape never reaches the Boss");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_COMPLETE,
+			"the main model received the Boss's words as typed",
+		);
+	});
+});
+
+test("a reshape that changes the Boss's words never reaches the editor, and the prompt goes on as typed", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: CHANGED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		assert.equal(session.editorText(), "", "the editor stays empty, so the changed words never reach the Boss");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_COMPLETE,
+			"the main model received the Boss's words as typed",
+		);
+	});
+});
+
+test("a short prompt that leaves a standing element missing is reported, not reshaped", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: '{"goal":true,"context":false,"constraints":true,"done-when":true}',
+		reshape: NO_CONTEXT_FIELDS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(NO_CONTEXT);
+		assert.equal(session.editorText(), "", "nothing is put in the editor");
+		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not ask for a reshape");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			NO_CONTEXT,
+			"the main model received the words as typed",
+		);
+	});
+});
+
+test("a typed prompt carrying an image goes on as typed, because the editor cannot hold it", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE, [IMAGE]);
+		assert.equal(session.editorText(), "", "nothing was put in the editor");
+		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt carrying an image");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_COMPLETE,
+			"the main model received the words as typed",
+		);
+	});
+});
+
+test("the notice after a reshape names the key that brings the original words back", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		assert.deepEqual(session.notices.map(({ message }) => message), [
+			"Shaper: shaped. alt+r restores your words.",
+		]);
+	});
 });
