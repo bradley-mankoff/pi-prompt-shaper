@@ -2,11 +2,12 @@
  * The outside service the Shaper's tests talk to: a pi provider at the edge that plays the
  * session's own model. It answers a prompt's own run with SHAPER_TEST_REPLY, the Shaper's element
  * check with SHAPER_TEST_CHECK_REPORT, the JSON report a model would give for the standing
- * elements, and the Shaper's reshape with SHAPER_TEST_RESHAPE_REPORT, the JSON fields a model
- * would give when it reorganizes a prompt under headers. It writes every request as one JSON
- * object a line to SHAPER_TEST_LOG, with the kind of request, the system prompt and the message
- * text it carried, so a test can see what the main agent received without reading inside the
- * extension.
+ * elements, the Shaper's inference with SHAPER_TEST_INFER_REPORT, the JSON answer a model would
+ * give for the elements the prompt lacks, and the Shaper's reshape with
+ * SHAPER_TEST_RESHAPE_REPORT, the JSON fields a model would give when it reorganizes a prompt
+ * under headers. It writes every request as one JSON object a line to SHAPER_TEST_LOG, with the
+ * kind of request, the system prompt and the message text it carried, so a test can see what the
+ * main agent received without reading inside the extension.
  *
  * The settings are read at request time, not at load time, so one test process can run several
  * sessions through a fresh environment.
@@ -30,16 +31,18 @@ const api = "shaper-test";
 
 /**
  * The first line of the Shaper's element check, which only that request carries, so this provider
- * can tell the check and the reshape from the prompt's own run and answer each the way the test
- * set up.
+ * can tell the Shaper's calls from the prompt's own run and answer each the way the test set up.
  */
 const CHECK_MARK = "You are the Shaper's element check.";
 
-/** The first line of the Shaper's reshape, the other request the Shaper makes of the model. */
+/** The first line of the Shaper's inference, the request that fills the elements a prompt lacks. */
+const INFER_MARK = "You are the Shaper's inference.";
+
+/** The first line of the Shaper's reshape, the third request the Shaper makes of the model. */
 const RESHAPE_MARK = "You are the Shaper's reshape.";
 
-/** The three requests a session's model can see: the prompt's own run, and the Shaper's two calls. */
-type RequestKind = "main" | "check" | "reshape";
+/** The four requests a session's model can see: the prompt's own run, and the Shaper's three calls. */
+type RequestKind = "main" | "check" | "infer" | "reshape";
 
 /** One test setting, read at request time so a fresh environment per test is enough. */
 const setting = (name: string, fallback: string): string => process.env[name] ?? fallback;
@@ -47,6 +50,13 @@ const setting = (name: string, fallback: string): string => process.env[name] ??
 /** What the session's model says when the Shaper checks a prompt; a test sets the report it wants. */
 const checkReply = (): string =>
 	setting("SHAPER_TEST_CHECK_REPORT", '{"goal":true,"context":true,"constraints":true,"done-when":true}');
+
+/**
+ * What the session's model says when the Shaper infers the elements a prompt lacks; a test sets
+ * the fills, scouts and questions it wants. The default answers nothing, so an element the test
+ * did not plan for is left as a gap rather than filled with an accidental answer.
+ */
+const inferReply = (): string => setting("SHAPER_TEST_INFER_REPORT", "{}");
 
 /**
  * What the session's model says when the Shaper asks for a reshape; a test sets the fields it
@@ -62,6 +72,7 @@ const reshapeReply = (): string => setting("SHAPER_TEST_RESHAPE_REPORT", "{}");
 const replyFor: Record<RequestKind, () => string> = {
 	main: () => setting("SHAPER_TEST_REPLY", "answered"),
 	check: checkReply,
+	infer: inferReply,
 	reshape: reshapeReply,
 };
 
@@ -122,11 +133,12 @@ const textOf = (entry: unknown): string => {
 };
 
 /**
- * The request kind, read from the instructions the request carries: the check and the reshape are
- * told apart from the prompt's own run by their first line.
+ * The request kind, read from the instructions the request carries: the check, the inference and
+ * the reshape are told apart from the prompt's own run by their first line.
  */
 function kindOf(system: string): RequestKind {
 	if (system.includes(CHECK_MARK)) return "check";
+	if (system.includes(INFER_MARK)) return "infer";
 	if (system.includes(RESHAPE_MARK)) return "reshape";
 	return "main";
 }

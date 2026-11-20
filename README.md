@@ -7,10 +7,10 @@ thin prompt under standing headers, fills what it can from the session, and puts
 the editor for accept or edit.
 
 This repository is the Shaper's own home. The package installs and loads, and with shaping on it
-checks each typed prompt for the standing elements (goal, context, constraints, done-when),
-reports the thin ones element by element, and reshapes a short prompt that carries all four under
-the four headers in the editor, with the original one keystroke away. Shaping arrives one slice at
-a time (Epic pp-csw).
+checks each typed prompt for the standing elements (goal, context, constraints, done-when), fills
+the absent ones from what the session already knows, marks the rest for the scout or a question,
+and reshapes a short prompt whose elements are then all there under the four headers in the editor,
+with the original one keystroke away. Shaping arrives one slice at a time (Epic pp-csw).
 
 ## Install
 
@@ -41,12 +41,18 @@ Settings live under a `shaper` key in pi's `settings.json`, either the global fi
 |---|---|---|
 | `shaper.enabled` | `false` | Whether the Shaper may shape a typed prompt. Off, or absent, sends every typed prompt on exactly as it was typed. |
 
-This slice builds the reshape. With the setting on, the Shaper asks the session's own model which
-standing elements a typed prompt carries. A prompt with an element missing gets a notice naming
-every element as present or missing, and the prompt still goes on exactly as it was typed. A short
-prompt (20 words or fewer) that carries all four comes back under the four headers, carrying the
-typed words and nothing else, in the editor. Nothing is sent until Enter; `alt+r` puts the original
-words back in the editor. A reshape that changes a word or runs past the length cap
+This slice builds the reshape and the cascade's first step, inference. With the setting on, the
+Shaper asks the session's own model which standing elements a typed prompt carries. A short prompt
+(20 words or fewer) that leaves an element missing has the absent ones filled from what the session
+already knows: the repo and branch it runs in, what the project's Beads remember, the conversation
+so far, and the project's own notes (the `AGENTS.md` files pi loads). Each gap the session cannot
+fill is marked for the scout, where the answer can be looked up, or for a question, where it
+cannot. Nothing is invented: a fill is kept only when every one of its words is a whole word the
+session's own sources carry, and an unsupported fill becomes a gap. A short prompt whose four
+elements are then all there comes back under the four headers, carrying the typed words and the
+session's fills, in the editor. A prompt that still has a gap is reported element by element and
+goes on exactly as it was typed. Nothing is sent until Enter; `alt+r` puts the original words back
+in the editor. A reshape that changes a word or runs past the length cap
 (`min(3 x the original's words, 250)`) is dropped, and the prompt goes on as typed. The default
 stays silence.
 
@@ -57,8 +63,9 @@ extras where the type is evident: a bug carries observed-versus-expected, a feat
 acceptance criteria. An absent element is inferred from the session where possible, sent to the
 scout agent where it can be placed but not filled, and asked of the Boss only when neither works.
 The reshaped text lands in the editor for accept or edit, and the original is kept for revert. Of
-that, this slice builds the check, the element report, and the reshape of an all-present prompt
-under the headers, with the editor review and the one-key revert.
+that, this slice builds the check, the inference from the session, the marks the scout and the
+question round will use, the reshape of a prompt whose elements are all there, the editor review
+and the one-key revert.
 
 ## Development
 
@@ -72,9 +79,11 @@ loader which extensions loaded and types a prompt in-process; two more load the 
 directory with the installed `pi` command, one with shaping off and one proving a print-mode
 prompt still goes on because there is no editor to hold it. The shape tests type a prompt
 in-process with a recorder standing in for the Boss's screen, so they read the Shaper's report and
-the editor the way the Boss does, and press the revert key through pi's shortcut registry. Every
-test checks what the main model received, what the Shaper said, or what it left in the editor,
-never how the extension is built.
+the editor the way the Boss does, and press the revert key through pi's shortcut registry. The
+inference tests stage the session a fill may come from: an earlier turn for the conversation, a git
+repository with a branch, an `AGENTS.md` for the project's notes, and a `bd` memory for Beads, then
+type the thin prompt. Every test checks what the main model received, what the Shaper said, what it
+asked the session's model to do, or what it left in the editor, never how the extension is built.
 
 ## License
 

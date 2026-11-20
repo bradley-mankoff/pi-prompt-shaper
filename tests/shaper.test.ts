@@ -76,6 +76,128 @@ keep the JSON shape the CLI tests parse
 and done when tests/queue.test.ts passes`;
 
 /**
+ * A short prompt carrying goal, constraints and done-when, but no context that aims the work. It is
+ * 17 words, under the Shaper's line for a short prompt, so the cascade runs on it.
+ */
+const SHORT_NO_CONTEXT =
+	"Rename recieve to receive, keep the JSON shape the CLI tests parse, and done when tests/queue.test.ts passes.";
+
+/**
+ * The conversation the Boss already had before typing SHORT_NO_CONTEXT: long enough (22 words) to
+ * pass untouched with every element present, and carrying the repo and the failing test in words.
+ */
+const EARLIER_TURN =
+	"I'm working in src/queue.ts on the retry bug: the CLI tests parse the JSON output, and the flaky job needs a limit.";
+
+/**
+ * The words the session already carries for the missing context, copied from EARLIER_TURN. An
+ * inference may use only words the session has, and this phrase is among them.
+ */
+const SESSION_CONTEXT_FILL = "I'm working in src/queue.ts on the retry bug";
+
+/** The branch the test workspace's repo is on, so the session knows it without the Boss typing it. */
+const BRANCH = "queue-retry-fix";
+
+/** The project notes the workspace's AGENTS.md carries: where the queue work lives. */
+const NOTES_FACT = "The queue work for this task is in src/queue.ts, where recieve is spelled wrong.";
+
+/** The words the project's notes carry for the missing context, copied from NOTES_FACT. */
+const NOTES_CONTEXT_FILL = "the queue work in src/queue.ts";
+
+/** The key of the one memory the workspace's Beads holds, and the fact it remembers. */
+const BEAD_KEY = "queue-retry-limit";
+const BEAD_FACT = "The queue retry limit is 5 because the flaky integration job needs it, in src/queue.ts.";
+
+/** The words the workspace's Bead carries for the missing context, copied from BEAD_FACT. */
+const BEAD_CONTEXT_FILL = "the retry limit is 5 in src/queue.ts";
+
+/**
+ * What the model answers when the project's notes, not the prompt or the conversation, carry the
+ * missing context: the fill is copied from NOTES_FACT.
+ */
+const NOTES_CONTEXT_INFER = JSON.stringify({ context: { filled: NOTES_CONTEXT_FILL } });
+
+/**
+ * What the model answers when the branch, not the prompt or the conversation, carries the missing
+ * context: the fill is the branch the session is already on.
+ */
+const BRANCH_CONTEXT_INFER = JSON.stringify({ context: { filled: BRANCH } });
+
+/**
+ * What the model answers when the project's Beads, not the prompt or the conversation, carry the
+ * missing context: the fill is copied from BEAD_FACT.
+ */
+const BEAD_CONTEXT_INFER = JSON.stringify({ context: { filled: BEAD_CONTEXT_FILL } });
+
+/**
+ * What the model answers when it fills the missing context with a piece of a path the session gave:
+ * "queue.ts" sits inside the session's "src/queue.ts", but it is not a word the session said, and a
+ * fill carrying half a path names the wrong file.
+ */
+const SHORT_PATH_CONTEXT_INFER = JSON.stringify({ context: { filled: "queue.ts" } });
+
+/**
+ * What the model answers when it fills the missing context with pi's own briefing words instead of
+ * the session's facts: none of these words is in the conversation, the project's notes, the branch
+ * or the repo, so the session never gave this answer.
+ */
+const BRIEFING_CONTEXT_INFER = JSON.stringify({ context: { filled: "an expert coding assistant" } });
+
+/** A check reply for SHORT_NO_CONTEXT: everything but the context is in the prompt. */
+const NO_CONTEXT_CHECK = '{"goal":true,"context":false,"constraints":true,"done-when":true}';
+
+/**
+ * What the model answers when asked to infer SHORT_NO_CONTEXT's context from a session that carries
+ * it: the fill, copied from the conversation.
+ */
+const SESSION_CONTEXT_INFER = JSON.stringify({ context: { filled: SESSION_CONTEXT_FILL } });
+
+/**
+ * What the model answers when it knows where the missing context lives but not the answer: the
+ * element is marked for the scout.
+ */
+const SCOUT_CONTEXT_INFER = JSON.stringify({ context: { scout: "the queue tests in src/queue.test.ts" } });
+
+/**
+ * What the model answers when it makes up words the session never carried: no session fact says
+ * src/payments.ts, so the Shaper may not fill the context with it.
+ */
+const INVENTED_CONTEXT_INFER = JSON.stringify({ context: { filled: "the flaky retry job in src/payments.ts" } });
+
+/**
+ * The reshape the session's model gives SHORT_NO_CONTEXT: the three elements the prompt carries,
+ * with the missing context left to the session's fill.
+ */
+const NO_CONTEXT_SHAPE_FIELDS = JSON.stringify({
+	goal: "Rename recieve to receive",
+	constraints: "keep the JSON shape the CLI tests parse",
+	"done-when": "and done when tests/queue.test.ts passes",
+});
+
+/**
+ * The shaped prompt the Boss sees when SHORT_NO_CONTEXT's context is filled with the given words:
+ * the three elements the prompt carries, and the fill under Context.
+ */
+const contextFilledShape = (context: string): string => `## Goal
+Rename recieve to receive
+
+## Context
+${context}
+
+## Constraints
+keep the JSON shape the CLI tests parse
+
+## Done-when
+and done when tests/queue.test.ts passes`;
+
+/** The notice a prompt whose only gap is context earns when nothing fills it. */
+const CONTEXT_QUESTION_NOTICE =
+	"Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when present";
+
+/** The notice after a shape that filled context from the session's words. */
+const CONTEXT_FILLED_NOTICE = "Shaper: shaped. context filled from the session. alt+r restores your words.";
+
+/**
  * A prompt short enough that the headers matter to the cap: four words give a 12-word cap, and the
  * four headers add eight words to whatever the fields carry.
  */
@@ -129,17 +251,26 @@ const SHAPING_ON = { shaper: { enabled: true } };
 
 /**
  * What a test sets up before pi runs: the settings pi reads, and how the session's model answers
- * the Shaper's two calls, the element report the check receives and the fields the reshape
- * receives. A test that names neither answer gets the check's all-present default and a reshape
- * reply the Shaper must refuse.
+ * the Shaper's three calls, the element report the check receives, the fills and marks the
+ * inference receives, and the fields the reshape receives. A test that names none gets the
+ * check's all-present default, an inference that answers nothing, and a reshape reply the Shaper
+ * must refuse.
  */
-type WorkspaceOptions = { settings?: Record<string, unknown>; check?: string; reshape?: string };
+type WorkspaceOptions = { settings?: Record<string, unknown>; check?: string; infer?: string; reshape?: string };
 
 /**
  * One temporary Mac: a HOME, an agent folder pi reads its settings from, the test provider's log,
- * and, when a test names them, the answers the session's model gives the Shaper's two calls.
+ * and, when a test names them, the answers the session's model gives the Shaper's calls.
  */
-type Workspace = { dir: string; home: string; agentDir: string; log: string; check?: string; reshape?: string };
+type Workspace = {
+	dir: string;
+	home: string;
+	agentDir: string;
+	log: string;
+	check?: string;
+	infer?: string;
+	reshape?: string;
+};
 
 /** Every workspace this file made, removed once its tests are done. */
 const workspaces: Workspace[] = [];
@@ -160,15 +291,41 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 	// missing file stays a fault instead of answering the same as no request.
 	writeFileSync(log, "");
 	if (options.settings !== undefined) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
-	const workspace = { dir, home, agentDir, log, check: options.check, reshape: options.reshape };
+	const workspace = { dir, home, agentDir, log, check: options.check, infer: options.infer, reshape: options.reshape };
 	workspaces.push(workspace);
 	return workspace;
 }
 
 /**
+ * Run one command in the workspace, and fail the test with its stderr when it does not succeed. The
+ * setup a test stages inside the workspace is part of what the test proves, so a failed command is
+ * the test's fault, not a case to read.
+ */
+function runInWorkspace(workspace: Workspace, command: string, args: string[]): void {
+	const result = spawnSync(command, args, { cwd: workspace.dir, encoding: "utf8" });
+	assert.equal(result.status, 0, `${command} ${args.join(" ")}: ${result.stderr}`);
+}
+
+/** Make the workspace a git repository on the named branch, so the session has a branch to read. */
+function initRepo(workspace: Workspace, branch: string): void {
+	runInWorkspace(workspace, "git", ["init", "-q", "-b", branch, "."]);
+}
+
+/** Put the project's own notes in the workspace, as AGENTS.md, the file pi loads as its context. */
+function writeNotes(workspace: Workspace, notes: string): void {
+	writeFileSync(join(workspace.dir, "AGENTS.md"), notes);
+}
+
+/** Give the workspace a Beads database holding one memory, so the session's Beads knows a fact. */
+function writeBead(workspace: Workspace, key: string, fact: string): void {
+	runInWorkspace(workspace, "bd", ["init"]);
+	runInWorkspace(workspace, "bd", ["remember", "--key", key, fact]);
+}
+
+/**
  * The environment a pi process runs in: a temporary HOME and agent folder, the provider's log, and,
- * when a test names them, the answers the session's model gives the Shaper's two calls. A test that
- * names neither answer leaves the variables out, so the provider's own defaults answer.
+ * when a test names them, the answers the session's model gives the Shaper's calls. A test that
+ * names no answer leaves the variables out, so the provider's own defaults answer.
  */
 const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	...process.env,
@@ -179,6 +336,7 @@ const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	PI_TELEMETRY: "0",
 	SHAPER_TEST_LOG: workspace.log,
 	...(workspace.check === undefined ? {} : { SHAPER_TEST_CHECK_REPORT: workspace.check }),
+	...(workspace.infer === undefined ? {} : { SHAPER_TEST_INFER_REPORT: workspace.infer }),
 	...(workspace.reshape === undefined ? {} : { SHAPER_TEST_RESHAPE_REPORT: workspace.reshape }),
 });
 
@@ -267,7 +425,13 @@ const loadPiSdk = (): Promise<PiSdk> =>
 	(piSdk ??= import(pathToFileURL(join(piPackageRoot(), "dist", "index.js")).href).then((module) => module as PiSdk));
 
 /** One request the test provider saw, as it wrote it to the log. */
-type Request = { provider: string; model: string; kind: "main" | "check" | "reshape"; system: string; messages: string[] };
+type Request = {
+	provider: string;
+	model: string;
+	kind: "main" | "check" | "infer" | "reshape";
+	system: string;
+	messages: string[];
+};
 
 /** Every request the test provider wrote, in order. */
 function requests(workspace: Workspace): Request[] {
@@ -280,6 +444,20 @@ function requests(workspace: Workspace): Request[] {
 /** Every request the Shaper sent the session's model to check a prompt's standing elements. */
 function checkRequests(workspace: Workspace): Request[] {
 	return requests(workspace).filter(({ kind }) => kind === "check");
+}
+
+/**
+ * Change the answer the session's model gives one kind of request from now on. The test provider
+ * reads its settings at request time, so a test whose session holds two prompts can have the model
+ * answer each prompt its own way, as a real model would.
+ */
+function answer(kind: "check" | "infer" | "reshape", reply: string): void {
+	process.env[`SHAPER_TEST_${kind.toUpperCase()}_REPORT`] = reply;
+}
+
+/** Every request the Shaper sent the session's model to infer a prompt's missing standing elements. */
+function inferRequests(workspace: Workspace): Request[] {
+	return requests(workspace).filter(({ kind }) => kind === "infer");
 }
 
 /** Every request the Shaper sent the session's model to reshape a prompt. */
@@ -337,7 +515,9 @@ async function openSession(workspace: Workspace): Promise<OpenSession> {
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
-			noContextFiles: true,
+			// Off only what a session's own agents and prompts would add to the transcript; the project's
+			// notes stay on, because AGENTS.md in the workspace is one of the sources a fill reads.
+			noContextFiles: false,
 		});
 		await loader.reload();
 		const loaded = loader.getExtensions();
@@ -445,7 +625,7 @@ test("with shaping on, a print-mode prompt still reaches the main model, because
 	assert.equal(main[0].messages.at(-1), SHORT_COMPLETE, "the main model received the words the Boss typed");
 });
 
-test("a thin prompt engages the Shaper, which reports each standing element as present or missing", async () => {
+test("a thin prompt engages the Shaper, which reports each standing element as present or a gap marked for a question", async () => {
 	const workspace = makeWorkspace({
 		settings: SHAPING_ON,
 		check: '{"goal":true,"context":false,"constraints":false,"done-when":false}',
@@ -453,8 +633,10 @@ test("a thin prompt engages the Shaper, which reports each standing element as p
 	const { notices } = await promptInSession(workspace, THIN);
 	assert.deepEqual(
 		notices.map(({ message }) => message),
-		["Shaper: thin prompt. goal present; context missing; constraints missing; done-when missing"],
-		"the Boss is told which standing elements the thin prompt carries and which it lacks",
+		[
+			"Shaper: thin prompt. goal present; context marked for a question; constraints marked for a question; done-when marked for a question",
+		],
+		"the Boss is told which standing elements the thin prompt carries and how the session placed the rest",
 	);
 	assert.equal(
 		mainRequests(workspace).at(-1)?.messages.at(-1),
@@ -485,7 +667,7 @@ test("a prompt missing its goal reports the goal missing and the other standing 
 	);
 });
 
-test("a prompt missing its context reports the context missing and the other standing elements present", async () => {
+test("a prompt missing its context reports the context marked for a question and the other standing elements present", async () => {
 	const workspace = makeWorkspace({
 		settings: SHAPING_ON,
 		check: '{"goal":true,"context":false,"constraints":true,"done-when":true}',
@@ -493,7 +675,7 @@ test("a prompt missing its context reports the context missing and the other sta
 	const { notices } = await promptInSession(workspace, NO_CONTEXT);
 	assert.deepEqual(
 		notices.map(({ message }) => message),
-		["Shaper: thin prompt. goal present; context missing; constraints present; done-when present"],
+		[CONTEXT_QUESTION_NOTICE],
 	);
 });
 
@@ -687,5 +869,199 @@ test("the notice after a reshape names the key that brings the original words ba
 		assert.deepEqual(session.notices.map(({ message }) => message), [
 			"Shaper: shaped. alt+r restores your words.",
 		]);
+	});
+});
+
+test("a gap the session already fills is inferred from the conversation, and the shaped prompt carries it under its header", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		infer: SESSION_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(EARLIER_TURN);
+		// The Boss has said where he is working, so the next prompt is the thin one: its check reports the
+		// context the prompt itself lacks, and the conversation now holds the words the session can fill it with.
+		answer("check", NO_CONTEXT_CHECK);
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(
+			session.editorText(),
+			contextFilledShape(SESSION_CONTEXT_FILL),
+			"the editor holds the prompt under the four headers, with the session's words under Context",
+		);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[CONTEXT_FILLED_NOTICE],
+			"the Boss is told the shape carries context the session supplied",
+		);
+		const main = mainRequests(workspace);
+		assert.equal(main.length, 1, "only the earlier turn reached the main model; the shape waited in the editor");
+		assert.equal(main[0].messages.at(-1), EARLIER_TURN, "the earlier turn reached the main model as the Boss typed it");
+	});
+});
+
+test("a gap the project's notes already fill is inferred from them, and the shaped prompt carries it under its header", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: NOTES_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	writeNotes(workspace, NOTES_FACT);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(
+			session.editorText(),
+			contextFilledShape(NOTES_CONTEXT_FILL),
+			"the editor holds the prompt under the four headers, with the project's notes under Context",
+		);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[CONTEXT_FILLED_NOTICE],
+			"the Boss is told the shape carries context the session supplied",
+		);
+	});
+});
+
+test("a gap the branch already fills is inferred from it, and the shaped prompt carries it under its header", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: BRANCH_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	initRepo(workspace, BRANCH);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(
+			session.editorText(),
+			contextFilledShape(BRANCH),
+			"the editor holds the prompt under the four headers, with the branch under Context",
+		);
+	});
+});
+
+test("a gap the project's Beads already fill is inferred from them, and the shaped prompt carries it under its header", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: BEAD_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	writeBead(workspace, BEAD_KEY, BEAD_FACT);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(
+			session.editorText(),
+			contextFilledShape(BEAD_CONTEXT_FILL),
+			"the editor holds the prompt under the four headers, with what the Beads remember under Context",
+		);
+	});
+});
+
+test("an inference drawn only from pi's own briefing words is refused, and the gap is marked for a question", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: BRIEFING_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(session.editorText(), "", "nothing is put in the editor, so no invented words reach the Boss");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[CONTEXT_QUESTION_NOTICE],
+			"the fill the session's own sources do not carry is refused, and the context becomes a question",
+		);
+	});
+});
+
+test("an inference made of a piece of a word the session said is refused, and the gap is marked for a question", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		infer: SHORT_PATH_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(EARLIER_TURN);
+		answer("check", NO_CONTEXT_CHECK);
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(session.editorText(), "", "nothing is put in the editor, so half a path never reaches the Boss");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[CONTEXT_QUESTION_NOTICE],
+			"the fill built from part of a path the session gave is refused, and the context becomes a question",
+		);
+	});
+});
+
+test("a gap the session cannot fill is marked for the scout, and the prompt goes on as typed", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(session.editorText(), "", "nothing is put in the editor while a gap remains");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			["Shaper: thin prompt. goal present; context marked for the scout; constraints present; done-when present"],
+			"the Boss is told the context is to be looked up, not invented or reshaped",
+		);
+		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_NO_CONTEXT,
+			"the main model received the words the Boss typed",
+		);
+	});
+});
+
+test("an inference the session's words do not carry is never filled, and the gap is marked for a question", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: INVENTED_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(session.editorText(), "", "nothing is put in the editor, so no invented words reach the Boss");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[CONTEXT_QUESTION_NOTICE],
+			"the fill the session does not carry is refused, and the context becomes a question",
+		);
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_NO_CONTEXT,
+			"the main model received the words the Boss typed",
+		);
+	});
+});
+
+test("the Shaper asks the session's own model to infer from the repo, the branch, the conversation, the session's Beads and the project's notes", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, infer: SESSION_CONTEXT_INFER, reshape: NO_CONTEXT_SHAPE_FIELDS });
+	initRepo(workspace, BRANCH);
+	writeNotes(workspace, NOTES_FACT);
+	writeBead(workspace, BEAD_KEY, BEAD_FACT);
+	await withSession(workspace, async (session) => {
+		await session.prompt(EARLIER_TURN);
+		answer("check", NO_CONTEXT_CHECK);
+		await session.prompt(SHORT_NO_CONTEXT);
+		const [call, ...extra] = inferRequests(workspace);
+		assert.equal(extra.length, 0, "the Shaper asked for one inference");
+		assert.equal(call.model, "main", "the inference runs on the session's own model");
+		const reading = call.messages.at(-1) ?? "";
+		assert.ok(reading.includes(`Repo:\n${workspace.dir}`), "the inference reads the repo the session runs in");
+		assert.ok(reading.includes(`Branch:\n${BRANCH}`), "the inference reads the branch the session is on");
+		assert.ok(reading.includes(EARLIER_TURN), "the inference reads the conversation the session already had");
+		assert.ok(reading.includes(BEAD_FACT), "the inference reads what the project's Beads remember");
+		assert.ok(reading.includes(NOTES_FACT), "the inference reads the project's own notes");
+		assert.ok(reading.endsWith(`Prompt as typed:\n${SHORT_NO_CONTEXT}`), "the inference reads the prompt as typed");
+		assert.ok(call.system.includes("every word of a fill must appear in it"), "the inference is told a fill has to be the session's own words");
 	});
 });
