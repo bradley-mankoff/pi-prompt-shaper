@@ -1,10 +1,12 @@
 /**
  * The outside service the Shaper's tests talk to: a pi provider at the edge that plays the
- * session's own model. It answers a prompt's own run with SHAPER_TEST_REPLY, and the Shaper's
- * element check with SHAPER_TEST_CHECK_REPORT, the JSON report a model would give for the
- * standing elements. It writes every request as one JSON object a line to SHAPER_TEST_LOG, with
- * the system prompt and message text the request carried, so a test can see what the main agent
- * received without reading inside the extension.
+ * session's own model. It answers a prompt's own run with SHAPER_TEST_REPLY, the Shaper's element
+ * check with SHAPER_TEST_CHECK_REPORT, the JSON report a model would give for the standing
+ * elements, and the Shaper's reshape with SHAPER_TEST_RESHAPE_REPORT, the JSON fields a model
+ * would give when it reorganizes a prompt under headers. It writes every request as one JSON
+ * object a line to SHAPER_TEST_LOG, with the kind of request, the system prompt and the message
+ * text it carried, so a test can see what the main agent received without reading inside the
+ * extension.
  *
  * The settings are read at request time, not at load time, so one test process can run several
  * sessions through a fresh environment.
@@ -28,9 +30,16 @@ const api = "shaper-test";
 
 /**
  * The first line of the Shaper's element check, which only that request carries, so this provider
- * can tell the check from the prompt's own run and answer each the way the test set up.
+ * can tell the check and the reshape from the prompt's own run and answer each the way the test
+ * set up.
  */
 const CHECK_MARK = "You are the Shaper's element check.";
+
+/** The first line of the Shaper's reshape, the other request the Shaper makes of the model. */
+const RESHAPE_MARK = "You are the Shaper's reshape.";
+
+/** The three requests a session's model can see: the prompt's own run, and the Shaper's two calls. */
+type RequestKind = "main" | "check" | "reshape";
 
 /** One test setting, read at request time so a fresh environment per test is enough. */
 const setting = (name: string, fallback: string): string => process.env[name] ?? fallback;
@@ -38,6 +47,23 @@ const setting = (name: string, fallback: string): string => process.env[name] ??
 /** What the session's model says when the Shaper checks a prompt; a test sets the report it wants. */
 const checkReply = (): string =>
 	setting("SHAPER_TEST_CHECK_REPORT", '{"goal":true,"context":true,"constraints":true,"done-when":true}');
+
+/**
+ * What the session's model says when the Shaper asks for a reshape; a test sets the fields it
+ * wants. The default names none of the four elements, so a test that did not plan for a reshape
+ * gets a reply the Shaper must refuse rather than an accidental shape.
+ */
+const reshapeReply = (): string => setting("SHAPER_TEST_RESHAPE_REPORT", "{}");
+
+/**
+ * The reply each kind of request earns, keyed by the kind `record` reads from the request, so the
+ * three answers are stated once in one place.
+ */
+const replyFor: Record<RequestKind, () => string> = {
+	main: () => setting("SHAPER_TEST_REPLY", "answered"),
+	check: checkReply,
+	reshape: reshapeReply,
+};
 
 const model = (id: string) => ({
 	id,
@@ -96,23 +122,33 @@ const textOf = (entry: unknown): string => {
 };
 
 /**
- * The one request the log records, so a test can see what the model was sent, and whether the
- * request was the Shaper's element check rather than the prompt's own run.
+ * The request kind, read from the instructions the request carries: the check and the reshape are
+ * told apart from the prompt's own run by their first line.
  */
-function record(requested: Model<Api>, context: Context): boolean {
+function kindOf(system: string): RequestKind {
+	if (system.includes(CHECK_MARK)) return "check";
+	if (system.includes(RESHAPE_MARK)) return "reshape";
+	return "main";
+}
+
+/**
+ * The one request the log records, so a test can see what the model was sent, and which of the
+ * three kinds of request it was.
+ */
+function record(requested: Model<Api>, context: Context): RequestKind {
 	const system = systemOf(context);
-	const check = system.includes(CHECK_MARK);
+	const kind = kindOf(system);
 	appendFileSync(
 		setting("SHAPER_TEST_LOG", "/dev/null"),
 		`${JSON.stringify({
 			provider: requested.provider,
 			model: requested.id,
-			check,
+			kind,
 			system,
 			messages: context.messages.filter((entry) => entry.role !== "system").map(textOf),
 		})}\n`,
 	);
-	return check;
+	return kind;
 }
 
 /** One reply, as pi's stream of events. */
@@ -135,8 +171,8 @@ export default function shaperTestProvider(pi: ExtensionAPI): void {
 		baseUrl: "http://localhost:0",
 		models: [model("main")],
 		streamSimple: (requested: Model<Api>, context: Context, _options?: SimpleStreamOptions) => {
-			const check = record(requested, context);
-			return replyOf(requested, check ? checkReply() : setting("SHAPER_TEST_REPLY", "answered"));
+			const kind = record(requested, context);
+			return replyOf(requested, replyFor[kind]());
 		},
 	});
 }
