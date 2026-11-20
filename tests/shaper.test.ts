@@ -76,14 +76,22 @@ keep the JSON shape the CLI tests parse
 and done when tests/queue.test.ts passes`;
 
 /**
- * A reshape that bursts the cap: the original's 19 words plus 40, and the headers, 67 words against
- * a 57-word cap.
+ * A prompt short enough that the headers matter to the cap: four words give a 12-word cap, and the
+ * four headers add eight words to whatever the fields carry.
+ */
+const TINY_COMPLETE = "Fix the queue now.";
+
+/**
+ * A reshape that keeps TINY_COMPLETE's four words and still bursts the cap: the lone "." is a
+ * token the word check ignores, so the rendered shape is 13 words against a cap of 12. A reshape
+ * that also dropped or added a word would be refused by the word check instead, and would test
+ * nothing about the cap.
  */
 const OVER_LONG_FIELDS = JSON.stringify({
-	goal: `rename recieve to receive ${"always ".repeat(40).trim()}`,
-	context: "In src/queue.ts",
-	constraints: "keep the JSON shape the CLI tests parse",
-	"done-when": "and done when tests/queue.test.ts passes",
+	goal: "Fix",
+	context: "the",
+	constraints: "queue",
+	"done-when": "now .",
 });
 
 /** A reshape inside the cap that adds a word the Boss never typed: "now". */
@@ -120,9 +128,10 @@ const STANDING_ELEMENTS = ["goal", "context", "constraints", "done-when"] as con
 const SHAPING_ON = { shaper: { enabled: true } };
 
 /**
- * How the session's model answers the Shaper's two calls: the element report the check receives,
- * and the fields the reshape receives. A test that names neither gets the check's all-present
- * default and a reshape reply the Shaper must refuse.
+ * What a test sets up before pi runs: the settings pi reads, and how the session's model answers
+ * the Shaper's two calls, the element report the check receives and the fields the reshape
+ * receives. A test that names neither answer gets the check's all-present default and a reshape
+ * reply the Shaper must refuse.
  */
 type WorkspaceOptions = { settings?: Record<string, unknown>; check?: string; reshape?: string };
 
@@ -158,8 +167,8 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 
 /**
  * The environment a pi process runs in: a temporary HOME and agent folder, the provider's log, and,
- * when a test names one, the element report the check's model gives. A test that names no report
- * leaves the variable out, so the provider's own default answers.
+ * when a test names them, the answers the session's model gives the Shaper's two calls. A test that
+ * names neither answer leaves the variables out, so the provider's own defaults answer.
  */
 const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	...process.env,
@@ -309,14 +318,13 @@ type OpenSession = SessionReadings & {
 async function openSession(workspace: Workspace): Promise<OpenSession> {
 	const notices: Notice[] = [];
 	let editor = "";
-	// pi types the whole UI port; only the three calls the Shaper uses are implemented, so the cast
+	// pi types the whole UI port; only the two calls the Shaper uses are implemented, so the cast
 	// avoids a stand-in full of no-ops. The notices and the editor text are what the Boss would read.
 	const ui = {
 		notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }),
 		setEditorText: (text: string) => {
 			editor = text;
 		},
-		getEditorText: () => editor,
 	} as unknown as ExtensionUIContext;
 	const restore = applyPiEnvironment(workspace);
 	try {
@@ -617,11 +625,11 @@ test("the original restored by revert goes on as the Boss typed it, without anot
 test("a reshape past the length cap never reaches the editor, and the prompt goes on as typed", async () => {
 	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: OVER_LONG_FIELDS });
 	await withSession(workspace, async (session) => {
-		await session.prompt(SHORT_COMPLETE);
+		await session.prompt(TINY_COMPLETE);
 		assert.equal(session.editorText(), "", "the editor stays empty, so the over-long reshape never reaches the Boss");
 		assert.equal(
 			mainRequests(workspace).at(-1)?.messages.at(-1),
-			SHORT_COMPLETE,
+			TINY_COMPLETE,
 			"the main model received the Boss's words as typed",
 		);
 	});

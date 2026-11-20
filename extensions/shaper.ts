@@ -175,17 +175,17 @@ async function checkElements(ctx: ExtensionContext, prompt: string): Promise<Ele
 }
 
 /**
- * How short a prompt must be to be reshaped: at most 20 words. The Spec names thinness as short or
- * missing elements and leaves the short line open; 20 words is one rushed line, and its reshape
- * budget still leaves room for the four headers.
+ * The most words a short prompt may carry and still be reshaped: 20. The Spec names thinness as
+ * short or missing elements and leaves the short line open; 20 words is one rushed line, and its
+ * reshape budget still leaves room for the four headers.
  */
-const SHORT_PROMPT_WORDS = 20;
+const SHORT_PROMPT_MAX_WORDS = 20;
 
 /** How many whitespace-separated words a text carries. */
 const wordCount = (text: string): number => text.trim().split(/\s+/).filter(Boolean).length;
 
-/** Whether a typed prompt is short enough for the reshape, as GLOSSARY.md uses thin. */
-const isShort = (prompt: string): boolean => wordCount(prompt) <= SHORT_PROMPT_WORDS;
+/** Whether a typed prompt is short, the first half of what GLOSSARY.md calls a thin prompt. */
+const isShort = (prompt: string): boolean => wordCount(prompt) <= SHORT_PROMPT_MAX_WORDS;
 
 /**
  * The first line of the reshape's instructions, so a provider that stands in for the session's
@@ -230,7 +230,7 @@ Answer with one JSON object and nothing else, one string per element:
 {"goal": "...", "context": "...", "constraints": "...", "done-when": "..."}`;
 };
 
-/** The four fields of a reshape, in the order the Boss reads them. */
+/** The four fields of a reshape, one per standing element. */
 type ShapeFields = Record<StandingElement, string>;
 
 /** The header each standing element is rendered under, in the order the Boss reads them. */
@@ -318,7 +318,7 @@ export default function shaper(pi: ExtensionAPI): void {
 	/** The shape waiting in the editor for the Boss to accept, edit or revert, if any. */
 	let pending: PendingShape | undefined;
 	/** The original a revert put back in the editor: it goes on once, unshaped. */
-	let reverted: string | undefined;
+	let revertedText: string | undefined;
 
 	// The one-key revert: the Boss's own words go back in the editor, and the next Enter sends them
 	// as typed. The shape is dropped, so nothing the Boss did not approve can follow the revert.
@@ -327,7 +327,7 @@ export default function shaper(pi: ExtensionAPI): void {
 		handler: (ctx) => {
 			if (pending === undefined) return;
 			ctx.ui.setEditorText(pending.original);
-			reverted = pending.original;
+			revertedText = pending.original;
 			pending = undefined;
 		},
 	});
@@ -344,20 +344,14 @@ export default function shaper(pi: ExtensionAPI): void {
 		if (!shapingEnabled(pi.getSettings())) return { action: "continue" };
 		// The Boss's own shaped text coming back from the editor goes on as it stands: accepting it is
 		// the send, and it is never checked or shaped a second time.
-		if (pending !== undefined && pending.shaped === event.text) {
-			pending = undefined;
-			reverted = undefined;
-			return { action: "continue" };
-		}
+		const acceptedShape = pending !== undefined && pending.shaped === event.text;
 		// A reverted original goes on once, exactly as the Boss typed it, without a second reshape.
-		if (reverted !== undefined && reverted === event.text) {
-			pending = undefined;
-			reverted = undefined;
-			return { action: "continue" };
-		}
-		// Anything else is a new typed prompt, so a shape left in the editor is no longer waiting.
+		const revertedOriginal = revertedText !== undefined && revertedText === event.text;
+		// Either way the held state has done its work; anything else is a new typed prompt, so a shape
+		// left in the editor is no longer waiting.
 		pending = undefined;
-		reverted = undefined;
+		revertedText = undefined;
+		if (acceptedShape || revertedOriginal) return { action: "continue" };
 		// A shape is text in the editor, which cannot carry the prompt's images, so a prompt with images
 		// goes on as typed rather than losing them.
 		if (event.images !== undefined && event.images.length > 0) return { action: "continue" };

@@ -30,7 +30,8 @@ const api = "shaper-test";
 
 /**
  * The first line of the Shaper's element check, which only that request carries, so this provider
- * can tell the check from the prompt's own run and answer each the way the test set up.
+ * can tell the check and the reshape from the prompt's own run and answer each the way the test
+ * set up.
  */
 const CHECK_MARK = "You are the Shaper's element check.";
 
@@ -53,6 +54,16 @@ const checkReply = (): string =>
  * gets a reply the Shaper must refuse rather than an accidental shape.
  */
 const reshapeReply = (): string => setting("SHAPER_TEST_RESHAPE_REPORT", "{}");
+
+/**
+ * The reply each kind of request earns, keyed by the kind `record` reads from the request, so the
+ * three answers are stated once in one place.
+ */
+const replyFor: Record<RequestKind, () => string> = {
+	main: () => setting("SHAPER_TEST_REPLY", "answered"),
+	check: checkReply,
+	reshape: reshapeReply,
+};
 
 const model = (id: string) => ({
 	id,
@@ -161,9 +172,7 @@ export default function shaperTestProvider(pi: ExtensionAPI): void {
 		models: [model("main")],
 		streamSimple: (requested: Model<Api>, context: Context, _options?: SimpleStreamOptions) => {
 			const kind = record(requested, context);
-			const reply =
-				kind === "check" ? checkReply() : kind === "reshape" ? reshapeReply() : setting("SHAPER_TEST_REPLY", "answered");
-			return replyOf(requested, reply);
+			return replyOf(requested, replyFor[kind]());
 		},
 	});
 }
