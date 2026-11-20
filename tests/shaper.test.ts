@@ -3,9 +3,9 @@
  * at the provider edge playing the session's own model. A test types a prompt the way the Boss
  * does and checks what the main model received; it never reads inside the extension.
  *
- * The first test runs pi's SDK in-process, so it can ask the resource loader which extensions
- * loaded before it types a prompt. The second drives the installed `pi` command with the package
- * directory, as `pi install` will.
+ * The first test runs pi's SDK in-process and gives the loader the package directory, so the
+ * extension it reports is the one the package manifest names. The second drives the installed
+ * `pi` command with the package directory, as `pi install` will.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -157,7 +157,8 @@ test("the package loads the Shaper extension, and with shaping off by default th
 		const loader = new sdk.DefaultResourceLoader({
 			cwd: workspace.dir,
 			agentDir: workspace.agentDir,
-			additionalExtensionPaths: [extension, testProvider],
+			// The package directory, so pi reads the extension from package.json's pi.extensions.
+			additionalExtensionPaths: [root, testProvider],
 			noSkills: true,
 			noPromptTemplates: true,
 			noThemes: true,
