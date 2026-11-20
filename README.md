@@ -6,9 +6,10 @@ Tweaker: the Tweaker repairs typos and near-miss names silently, while the Shape
 thin prompt under standing headers, fills what it can from the session, and puts the result in
 the editor for accept or edit.
 
-This repository is the Shaper's own home and, for now, its scaffold. The package installs and
-loads, and every typed prompt passes through untouched. Shaping arrives one slice at a time
-(Epic pp-csw).
+This repository is the Shaper's own home. The package installs and loads, and with shaping on it
+checks each typed prompt for the standing elements (goal, context, constraints, done-when) and
+reports the thin ones element by element. No prompt is reshaped yet: shaping arrives one slice at
+a time (Epic pp-csw).
 
 ## Install
 
@@ -39,17 +40,20 @@ Settings live under a `shaper` key in pi's `settings.json`, either the global fi
 |---|---|---|
 | `shaper.enabled` | `false` | Whether the Shaper may shape a typed prompt. Off, or absent, sends every typed prompt on exactly as it was typed. |
 
-This slice has no shaping stage yet, so turning the setting on does not change a prompt either.
-The setting is the switch the next slices build behind, and the default is silence.
+This slice builds the trigger. With the setting on, the Shaper asks the session's own model which
+standing elements a typed prompt carries. A prompt with all four passes through untouched and
+silently; a thin prompt gets a notice naming every element as present or missing, and the prompt
+still goes on exactly as it was typed. The reshape and the editor review are the next slice. The
+default stays silence.
 
 ## What the Shaper will do
 
-The standing elements it will check are goal, context, constraints and done-when, with
-task-type extras where the type is evident: a bug carries observed-versus-expected, a feature
-carries acceptance criteria. An absent element is inferred from the session where possible, sent
-to the scout agent where it can be placed but not filled, and asked of the Boss only when neither
-works. The reshaped text lands in the editor for accept or edit, and the original is kept for
-revert. No part of that is built in this slice.
+The standing elements it checks are goal, context, constraints and done-when, with task-type
+extras where the type is evident: a bug carries observed-versus-expected, a feature carries
+acceptance criteria. An absent element is inferred from the session where possible, sent to the
+scout agent where it can be placed but not filled, and asked of the Boss only when neither works.
+The reshaped text lands in the editor for accept or edit, and the original is kept for revert. Of
+that, this slice builds the check and the trigger: the element report, not the reshape.
 
 ## Development
 
@@ -60,8 +64,10 @@ npm test
 The tests drive the seam the Spec names: a real pi session that loads the package, with a test
 provider at the provider edge playing the session's own model. One test asks pi's resource
 loader which extensions loaded and types a prompt in-process; the other loads the package
-directory with the installed `pi` command. Both check what the main model received, never how
-the extension is built.
+directory with the installed `pi` command. The trigger tests type a prompt in-process with a
+recorder standing in for the Boss's screen, so they read the Shaper's report the way the Boss
+reads it. Every test checks what the main model received and what the Shaper said, never how the
+extension is built.
 
 ## License
 
