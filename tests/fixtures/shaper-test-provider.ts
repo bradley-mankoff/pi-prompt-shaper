@@ -1,8 +1,10 @@
 /**
  * The outside service the Shaper's tests talk to: a pi provider at the edge that plays the
- * session's own model. It answers with SHAPER_TEST_REPLY, and writes every request as one JSON
- * object a line to SHAPER_TEST_LOG, with the system prompt and message text the request carried,
- * so a test can see what the main agent received without reading inside the extension.
+ * session's own model. It answers a prompt's own run with SHAPER_TEST_REPLY, and the Shaper's
+ * element check with SHAPER_TEST_CHECK_REPORT, the JSON report a model would give for the
+ * standing elements. It writes every request as one JSON object a line to SHAPER_TEST_LOG, with
+ * the system prompt and message text the request carried, so a test can see what the main agent
+ * received without reading inside the extension.
  *
  * The settings are read at request time, not at load time, so one test process can run several
  * sessions through a fresh environment.
@@ -24,8 +26,18 @@ import {
 const provider = "shaper-test";
 const api = "shaper-test";
 
+/**
+ * The first line of the Shaper's element check, which only that request carries, so this provider
+ * can tell the check from the prompt's own run and answer each the way the test set up.
+ */
+const CHECK_MARK = "You are the Shaper's element check.";
+
 /** One test setting, read at request time so a fresh environment per test is enough. */
 const setting = (name: string, fallback: string): string => process.env[name] ?? fallback;
+
+/** What the session's model says when the Shaper checks a prompt; a test sets the report it wants. */
+const checkReply = (): string =>
+	setting("SHAPER_TEST_CHECK_REPORT", '{"goal":true,"context":true,"constraints":true,"done-when":true}');
 
 const model = (id: string) => ({
 	id,
@@ -83,17 +95,24 @@ const textOf = (entry: unknown): string => {
 		.join("\n");
 };
 
-/** The one request the log records, so a test can see what the model was sent. */
-function record(requested: Model<Api>, context: Context): void {
+/**
+ * The one request the log records, so a test can see what the model was sent, and whether the
+ * request was the Shaper's element check rather than the prompt's own run.
+ */
+function record(requested: Model<Api>, context: Context): boolean {
+	const system = systemOf(context);
+	const check = system.includes(CHECK_MARK);
 	appendFileSync(
 		setting("SHAPER_TEST_LOG", "/dev/null"),
 		`${JSON.stringify({
 			provider: requested.provider,
 			model: requested.id,
-			system: systemOf(context),
+			check,
+			system,
 			messages: context.messages.filter((entry) => entry.role !== "system").map(textOf),
 		})}\n`,
 	);
+	return check;
 }
 
 /** One reply, as pi's stream of events. */
@@ -116,8 +135,8 @@ export default function shaperTestProvider(pi: ExtensionAPI): void {
 		baseUrl: "http://localhost:0",
 		models: [model("main")],
 		streamSimple: (requested: Model<Api>, context: Context, _options?: SimpleStreamOptions) => {
-			record(requested, context);
-			return replyOf(requested, setting("SHAPER_TEST_REPLY", "answered"));
+			const check = record(requested, context);
+			return replyOf(requested, check ? checkReply() : setting("SHAPER_TEST_REPLY", "answered"));
 		},
 	});
 }
