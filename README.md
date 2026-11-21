@@ -1,4 +1,4 @@
-# pi-shaper
+# pi-prompt-shaper
 
 The Shaper lifts thin typed pi prompts toward a consistent high-quality shape. It is a separate
 product from [pi-prompterize](https://github.com/bradley-mankoff/pi-prompterize), which stays the
@@ -17,13 +17,13 @@ pp-csw).
 ## Install
 
 ```bash
-pi install git:github.com/bradley-mankoff/pi-shaper
+pi install git:github.com/bradley-mankoff/pi-prompt-shaper
 ```
 
 Or try it for one session without installing:
 
 ```bash
-pi -e ./pi-shaper
+pi -e ./pi-prompt-shaper
 ```
 
 ## Settings
