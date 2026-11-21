@@ -138,7 +138,9 @@ Shaper lift: 0.67 correction turns per task (thin prompts: 1.08 without shaping,
 The number is a measurement of these twelve prompts with these two models, not a promise about
 every prompt: a thin prompt too short for the reshape's length cap cannot carry the fill, and a
 model that cannot follow the reshape's word-for-word contract produces no shape at all. The harness
-prints the shapes per arm so a run where shaping did nothing is visible.
+prints the shapes per arm so a run where shaping did nothing is visible. The control is not always
+exactly zero, because the judge is a model and one run can move by a case or two; the clear arms
+are there to show how far the judge's own noise reaches.
 
 ## Development
 
