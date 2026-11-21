@@ -1,4 +1,4 @@
-# pi-shaper
+# pi-prompt-shaper
 
 The Shaper lifts thin typed prompts toward a consistent high-quality shape, in its own pi package,
 separate from pi-prompterize.

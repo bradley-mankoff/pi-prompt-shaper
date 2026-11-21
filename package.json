@@ -1,5 +1,5 @@
 {
-  "name": "pi-shaper",
+  "name": "pi-prompt-shaper",
   "version": "0.1.0",
   "description": "The Shaper lifts thin typed pi prompts toward a consistent high-quality shape, opt-in and silent by default.",
   "license": "MIT",
