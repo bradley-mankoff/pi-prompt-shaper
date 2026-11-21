@@ -9,9 +9,10 @@ the editor for accept or edit.
 This repository is the Shaper's own home. The package installs and loads, and with shaping on it
 checks each typed prompt for the standing elements (goal, context, constraints, done-when), fills
 the absent ones from what the session already knows, sends each remaining gap the session can
-place to the scout agent, marks what the scout cannot find for a question, and reshapes a short
-prompt whose elements are then all there under the four headers in the editor, with the original
-one keystroke away. Shaping arrives one slice at a time (Epic pp-csw).
+place to the scout agent, puts what neither of them can answer to the Boss as one round of
+questions, and reshapes a short prompt whose elements are then all there under the four headers in
+the editor, with the original one keystroke away. Shaping arrives one slice at a time (Epic
+pp-csw).
 
 ## Install
 
@@ -42,7 +43,7 @@ Settings live under a `shaper` key in pi's `settings.json`, either the global fi
 |---|---|---|
 | `shaper.enabled` | `false` | Whether the Shaper may shape a typed prompt. Off, or absent, sends every typed prompt on exactly as it was typed. |
 
-This slice builds the reshape and the cascade's first two steps, inference and the scout. With the
+This slice builds the reshape and the cascade's last resort, the question round. With the
 setting on, the Shaper asks the session's own model which standing elements a typed prompt carries.
 A short prompt (20 words or fewer) that leaves an element missing has the absent ones filled from
 what the session already knows: the repo and branch it runs in, what the project's Beads remember,
@@ -53,26 +54,39 @@ Shaper drops `write` and `edit` from whatever the definition names, gives it the
 the definition names none of them, and tells the scout to leave no file behind. The Boss is told
 while a lookup runs, and the Shaper holds no lookup tool and reads nothing itself. The scout is
 told the words the reshape's cap leaves for its answer, and an answer that runs long is cut to
-that budget rather than thrown away. What the scout finds fills the element, and what it cannot
-find becomes a question, not a guess. Nothing is invented: a fill from the session is kept only
-when every one of its words is a whole word the session's own sources carry, and an unsupported
-fill becomes a gap. A short prompt whose four elements are then all there comes back under the
-four headers, carrying the typed words, the session's fills and the scout's context, in the
-editor. A prompt that still has a gap is reported element by element and goes on exactly as it was
-typed. Nothing is sent until Enter; `alt+r` puts the original words back in the editor. A reshape
-that changes a word or runs past the length cap (`min(3 x the original's words, 250)`) is dropped,
-and the prompt goes on as typed. The default stays silence.
+that budget rather than thrown away. What the scout finds fills the element. Nothing is invented: a
+fill from the session is kept only when every one of its words is a whole word the session's own
+sources carry, and an unsupported fill becomes a gap.
+
+What neither the session nor the scout can answer is put to the Boss as one round of questions, in
+the grilling skill's format: each question numbered, each with the answer the Shaper suggests, and
+one word, yes, accepts every suggestion. The round opens in pi's dialog with the round itself and a
+line to answer after it, so the Boss can also answer by number, as `Q1: ...`. The questions are
+written by the session's own model, which states the facts the session has for each, and only the
+elements that got through the session and the scout are asked. The round states the words each
+answer has room for, since the reshape drops a shape past its length cap; an answer that runs past
+that room is left out with a notice and its element stays open, rather than the Boss's words
+vanishing when the shape is refused. An answer that fits fills its element, and the reshape goes on
+with it: one word, yes, and the answered element reads under its header in the editor.
+
+A short prompt whose four elements are then all there comes back under the four headers, carrying
+the typed words, the session's fills, the scout's context and the Boss's answers, in the editor. A
+prompt that still has a gap, because a question went unanswered, is reported element by element and
+goes on exactly as it was typed, and no second round is asked. Nothing is sent until Enter; `alt+r`
+puts the original words back in the editor. A reshape that changes a word or runs past the length
+cap (`min(3 x the original's words, 250)`) is dropped, and the prompt goes on as typed. The default
+stays silence.
 
 ## What the Shaper will do
 
 The standing elements it checks are goal, context, constraints and done-when, with task-type
 extras where the type is evident: a bug carries observed-versus-expected, a feature carries
 acceptance criteria. An absent element is inferred from the session where possible, sent to the
-scout agent where it can be placed but not filled, and asked of the Boss only when neither works.
-The reshaped text lands in the editor for accept or edit, and the original is kept for revert. Of
-that, this slice builds the check, the inference from the session, the scout lookup, the marks the
-question round will use, the reshape of a prompt whose elements are all there, the editor review
-and the one-key revert.
+scout agent where it can be placed but not filled, and asked of the Boss only when neither works,
+in one round of numbered questions with a suggested answer each. The reshaped text lands in the
+editor for accept or edit, and the original is kept for revert. Of that, this slice builds the
+check, the inference from the session, the scout lookup, the question round, the reshape of a
+prompt whose elements are all there, the editor review and the one-key revert.
 
 ## Development
 
@@ -94,9 +108,16 @@ agent folder and put a stand-in `pi` on the workspace's PATH, so the process the
 the scout is a stand-in that records how it was asked and answers with the test's finding; they
 read that record to see the scout ran on its own model, with the read tools only, at the place the
 session named, with the words the reshape's cap leaves, and the editor to see what the Shaper made
-of the answer, including one that runs past that budget. Every test checks what the main model
-received, what the Shaper said, what it asked the session's model or the scout to do, or what it
-left in the editor, never how the extension is built.
+of the answer, including one that runs past that budget. The question round tests stage what the
+session's model writes for the elements nothing else could answer and what the Boss types after the
+round's answer line, so they read the round in the dialog, the words each answer has room for, the
+shape the answers produce in the editor, and the notice that names which source filled each
+element; they answer by number, with a leading no, on one line, and too long for the shape, and one
+dismisses the round and checks that the questions stay open and no second round is asked. One test
+follows the whole cascade: the scout answers NOT FOUND, the round asks the question, and the Boss's
+answer fills the element. Every test checks what the main model received, what the Shaper said, what
+it asked the session's model or the scout to do, or what it left in the editor or the round, never
+how the extension is built.
 
 ## License
 
