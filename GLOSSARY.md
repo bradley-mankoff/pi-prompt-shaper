@@ -42,3 +42,8 @@ _Avoid_: template, rubric
 **Scout**:
 The agent that looks up a gap the Shaper can place but cannot fill from the session.
 _Avoid_: researcher, lookup agent
+
+**Question round**:
+The one round of numbered questions, each with a suggested answer, that the Shaper puts to the Boss
+for what neither the session nor the scout could answer; one word, yes, accepts every suggestion.
+_Avoid_: interview, clarification, follow-up questions

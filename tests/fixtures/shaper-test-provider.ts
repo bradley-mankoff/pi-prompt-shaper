@@ -3,11 +3,12 @@
  * session's own model. It answers a prompt's own run with SHAPER_TEST_REPLY, the Shaper's element
  * check with SHAPER_TEST_CHECK_REPORT, the JSON report a model would give for the standing
  * elements, the Shaper's inference with SHAPER_TEST_INFER_REPORT, the JSON answer a model would
- * give for the elements the prompt lacks, and the Shaper's reshape with
- * SHAPER_TEST_RESHAPE_REPORT, the JSON fields a model would give when it reorganizes a prompt
- * under headers. It writes every request as one JSON object a line to SHAPER_TEST_LOG, with the
- * kind of request, the system prompt and the message text it carried, so a test can see what the
- * main agent received without reading inside the extension.
+ * give for the elements the prompt lacks, the Shaper's question round with SHAPER_TEST_ASK_REPORT,
+ * the JSON questions and suggested answers a model would give for the elements nothing could
+ * answer, and the Shaper's reshape with SHAPER_TEST_RESHAPE_REPORT, the JSON fields a model would
+ * give when it reorganizes a prompt under headers. It writes every request as one JSON object a
+ * line to SHAPER_TEST_LOG, with the kind of request, the system prompt and the message text it
+ * carried, so a test can see what the main agent received without reading inside the extension.
  *
  * The settings are read at request time, not at load time, so one test process can run several
  * sessions through a fresh environment.
@@ -38,11 +39,14 @@ const CHECK_MARK = "You are the Shaper's element check.";
 /** The first line of the Shaper's inference, the request that fills the elements a prompt lacks. */
 const INFER_MARK = "You are the Shaper's inference.";
 
-/** The first line of the Shaper's reshape, the third request the Shaper makes of the model. */
+/** The first line of the Shaper's question round, the request for what nothing could answer. */
+const ASK_MARK = "You are the Shaper's question round.";
+
+/** The first line of the Shaper's reshape, the last request the Shaper makes of the model. */
 const RESHAPE_MARK = "You are the Shaper's reshape.";
 
-/** The four requests a session's model can see: the prompt's own run, and the Shaper's three calls. */
-type RequestKind = "main" | "check" | "infer" | "reshape";
+/** The five requests a session's model can see: the prompt's own run, and the Shaper's four calls. */
+type RequestKind = "main" | "check" | "infer" | "ask" | "reshape";
 
 /** One test setting, read at request time so a fresh environment per test is enough. */
 const setting = (name: string, fallback: string): string => process.env[name] ?? fallback;
@@ -59,6 +63,13 @@ const checkReply = (): string =>
 const inferReply = (): string => setting("SHAPER_TEST_INFER_REPORT", "{}");
 
 /**
+ * What the session's model says when the Shaper asks for the question round; a test sets the
+ * question and suggested answer it wants per element. The default answers nothing, so a test that
+ * did not plan for a round gets a reply the Shaper must refuse rather than an accidental question.
+ */
+const askReply = (): string => setting("SHAPER_TEST_ASK_REPORT", "{}");
+
+/**
  * What the session's model says when the Shaper asks for a reshape; a test sets the fields it
  * wants. The default names none of the four elements, so a test that did not plan for a reshape
  * gets a reply the Shaper must refuse rather than an accidental shape.
@@ -73,6 +84,7 @@ const replyFor: Record<RequestKind, () => string> = {
 	main: () => setting("SHAPER_TEST_REPLY", "answered"),
 	check: checkReply,
 	infer: inferReply,
+	ask: askReply,
 	reshape: reshapeReply,
 };
 
@@ -139,6 +151,7 @@ const textOf = (entry: unknown): string => {
 function kindOf(system: string): RequestKind {
 	if (system.includes(CHECK_MARK)) return "check";
 	if (system.includes(INFER_MARK)) return "infer";
+	if (system.includes(ASK_MARK)) return "ask";
 	if (system.includes(RESHAPE_MARK)) return "reshape";
 	return "main";
 }

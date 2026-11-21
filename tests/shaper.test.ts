@@ -1,8 +1,9 @@
 /**
  * The seam the Bead's Spec names: a real pi session that loads the Shaper, with a test provider
  * at the provider edge playing the session's own model. A test types a prompt the way the Boss
- * does, presses the shortcut the Boss presses, and checks what the main model received, what the
- * Shaper told the Boss, and what it left in the editor; it never reads inside the extension.
+ * does, answers the round the way the Boss answers it, presses the shortcut the Boss presses, and
+ * checks what the main model received, what the Shaper told the Boss, what it asked in its dialog,
+ * and what it left in the editor; it never reads inside the extension.
  *
  * The first test runs pi's SDK in-process and gives the loader the package directory, so the
  * extension it reports is the one the package manifest names. The next two drive the installed
@@ -256,6 +257,152 @@ const CONTEXT_QUESTION_NOTICE =
 const CONTEXT_FILLED_NOTICE = "Shaper: shaped. context filled from the session. alt+r restores your words.";
 
 /**
+ * The question the session's model writes for the one element nothing could answer, and the answer
+ * it suggests: SHORT_NO_CONTEXT's missing context, when nothing in the session fills it.
+ */
+const CONTEXT_QUESTION = "Which file holds the retry bug?";
+const CONTEXT_SUGGESTION = "the queue retry in src/queue.ts";
+const CONTEXT_ASK = JSON.stringify({ context: { question: CONTEXT_QUESTION, suggested: CONTEXT_SUGGESTION } });
+
+/** The title on the dialog the one question round waits in. */
+const ROUND_TITLE = "Shaper: one question round";
+
+/**
+ * The round the Boss reads for SHORT_NO_CONTEXT when nothing could answer its context: the grilling
+ * skill's format, one numbered question with the answer the Shaper suggests, then the line the Boss
+ * answers after.
+ */
+const CONTEXT_ROUND = `**Round 1**
+
+Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
+
+❓ **Q1** - **context**
+
+${CONTEXT_QUESTION}
+
+➡️ ${CONTEXT_SUGGESTION}
+
+Your answer:`;
+
+/**
+ * A short prompt carrying its goal and its constraints, with neither a context that aims the work
+ * nor a way to tell it is finished: the prompt whose context the session fills and whose done-when
+ * only the Boss can answer.
+ */
+const SHORT_NO_CONTEXT_NO_DONE_WHEN = "Rename recieve to receive, and keep the JSON shape the CLI tests parse.";
+
+/** A check reply for it: the goal and the constraints are in the prompt, and nothing else is. */
+const NO_CONTEXT_NO_DONE_WHEN_CHECK = '{"goal":true,"context":false,"constraints":true,"done-when":false}';
+
+/**
+ * The question the session's model writes for the one element nothing could answer here, the
+ * done-when, and the answer it suggests. It is two words, inside the ten the cap leaves.
+ */
+const DONE_WHEN_QUESTION = "What tells you the rename is finished?";
+const DONE_WHEN_SUGGESTION = "tests/queue.test.ts passes";
+const DONE_WHEN_ASK = JSON.stringify({
+	"done-when": { question: DONE_WHEN_QUESTION, suggested: DONE_WHEN_SUGGESTION },
+});
+
+/** The round the Boss reads for SHORT_NO_CONTEXT_NO_DONE_WHEN: the done-when, numbered first of one. */
+const DONE_WHEN_ROUND = `**Round 1**
+
+Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
+
+❓ **Q1** - **done-when**
+
+${DONE_WHEN_QUESTION}
+
+➡️ ${DONE_WHEN_SUGGESTION}
+
+Your answer:`;
+
+/** The two questions the model writes when nothing could answer the context or the done-when. */
+const TWO_QUESTION_ASK = JSON.stringify({
+	context: { question: CONTEXT_QUESTION, suggested: CONTEXT_SUGGESTION },
+	"done-when": { question: DONE_WHEN_QUESTION, suggested: DONE_WHEN_SUGGESTION },
+});
+
+/** The round the Boss reads for SHORT_NO_CONTEXT_NO_DONE_WHEN when neither gap could be answered. */
+const TWO_QUESTION_ROUND = `**Round 1**
+
+Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
+
+❓ **Q1** - **context**
+
+${CONTEXT_QUESTION}
+
+➡️ ${CONTEXT_SUGGESTION}
+
+---
+
+❓ **Q2** - **done-when**
+
+${DONE_WHEN_QUESTION}
+
+➡️ ${DONE_WHEN_SUGGESTION}
+
+Your answer:`;
+
+/** The Boss's answers to that round, each by its number and in his own words rather than the suggestions. */
+const BOSS_CONTEXT_ANSWER = "the retry bug in src/queue.ts";
+const BOSS_DONE_WHEN_ANSWER = "tests/queue.test.ts is green";
+const TWO_NUMBERED_ANSWERS = `Q1: ${BOSS_CONTEXT_ANSWER}\nQ2: ${BOSS_DONE_WHEN_ANSWER}`;
+
+/**
+ * A short prompt carrying its goal, its context and its constraints, with no way to tell the work
+ * is finished: the prompt whose only gap only the Boss can answer, in his own words.
+ */
+const SHORT_NO_DONE_WHEN =
+	"In src/queue.ts, rename recieve to receive, keeping the JSON shape the CLI tests parse.";
+
+/** A check reply for SHORT_NO_DONE_WHEN: every element but the done-when is in the prompt. */
+const NO_DONE_WHEN_ONLY_CHECK = '{"goal":true,"context":true,"constraints":true,"done-when":false}';
+
+/** The reshape the session's model gives SHORT_NO_DONE_WHEN: the three elements the prompt carries. */
+const NO_DONE_WHEN_FIELDS = JSON.stringify({
+	goal: "rename recieve to receive,",
+	context: "In src/queue.ts",
+	constraints: "keeping the JSON shape the CLI tests parse.",
+});
+
+/** The shaped prompt the Boss sees when the done-when is the only element a fill supplies. */
+const doneWhenFilledShape = (doneWhen: string): string => `## Goal
+rename recieve to receive,
+
+## Context
+In src/queue.ts
+
+## Constraints
+keeping the JSON shape the CLI tests parse.
+
+## Done-when
+${doneWhen}`;
+
+/** The reshape the session's model gives SHORT_NO_CONTEXT_NO_DONE_WHEN: the two elements it carries. */
+const NO_CONTEXT_NO_DONE_WHEN_FIELDS = JSON.stringify({
+	goal: "Rename recieve to receive,",
+	constraints: "and keep the JSON shape the CLI tests parse.",
+});
+
+/** The shaped prompt the Boss sees when the context and the done-when both come from a fill. */
+const bothFilledShape = (context: string, doneWhen: string): string => `## Goal
+Rename recieve to receive,
+
+## Context
+${context}
+
+## Constraints
+and keep the JSON shape the CLI tests parse.
+
+## Done-when
+${doneWhen}`;
+
+/** The notice after a shape whose context came from the session and whose done-when came from the Boss. */
+const BOTH_FILLED_NOTICE =
+	"Shaper: shaped. context filled from the session; done-when filled by your answer. alt+r restores your words.";
+
+/**
  * A prompt short enough that the headers matter to the cap: four words give a 12-word cap, and the
  * four headers add eight words to whatever the fields carry.
  */
@@ -318,7 +465,10 @@ type WorkspaceOptions = {
 	settings?: Record<string, unknown>;
 	check?: string;
 	infer?: string;
+	ask?: string;
 	reshape?: string;
+	/** What the Boss types after the question round's answer line; absent, he dismisses the dialog. */
+	answer?: string;
 };
 
 /**
@@ -335,8 +485,10 @@ type Workspace = {
 	scoutLog: string;
 	check?: string;
 	infer?: string;
+	ask?: string;
 	reshape?: string;
 	scoutReply?: string;
+	answer?: string;
 };
 
 /** Every workspace this file made, removed once its tests are done. */
@@ -371,7 +523,9 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 		scoutLog,
 		check: options.check,
 		infer: options.infer,
+		ask: options.ask,
 		reshape: options.reshape,
+		answer: options.answer,
 	};
 	workspaces.push(workspace);
 	return workspace;
@@ -465,6 +619,7 @@ const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	SHAPER_TEST_SCOUT_LOG: workspace.scoutLog,
 	...(workspace.check === undefined ? {} : { SHAPER_TEST_CHECK_REPORT: workspace.check }),
 	...(workspace.infer === undefined ? {} : { SHAPER_TEST_INFER_REPORT: workspace.infer }),
+	...(workspace.ask === undefined ? {} : { SHAPER_TEST_ASK_REPORT: workspace.ask }),
 	...(workspace.reshape === undefined ? {} : { SHAPER_TEST_RESHAPE_REPORT: workspace.reshape }),
 	...(workspace.scoutReply === undefined ? {} : { SHAPER_TEST_SCOUT_REPLY: workspace.scoutReply }),
 });
@@ -563,7 +718,7 @@ const loadPiSdk = (): Promise<PiSdk> =>
 type Request = {
 	provider: string;
 	model: string;
-	kind: "main" | "check" | "infer" | "reshape";
+	kind: "main" | "check" | "infer" | "ask" | "reshape";
 	system: string;
 	messages: string[];
 };
@@ -600,6 +755,11 @@ function reshapeRequests(workspace: Workspace): Request[] {
 	return requests(workspace).filter(({ kind }) => kind === "reshape");
 }
 
+/** Every request the Shaper sent the session's model for the one question round. */
+function askRequests(workspace: Workspace): Request[] {
+	return requests(workspace).filter(({ kind }) => kind === "ask");
+}
+
 /** One call the Shaper made to the scout agent, as the scout's own process recorded it. */
 type ScoutCall = { cwd: string; args: string[] };
 
@@ -625,8 +785,14 @@ function mainRequests(workspace: Workspace): Request[] {
 /** One notice the Shaper showed the Boss through pi's UI. */
 type Notice = { message: string; type?: "info" | "warning" | "error" };
 
-/** What one in-process session leaves a test to read: the notices the Shaper showed, and what pi loaded. */
-type SessionReadings = { notices: Notice[]; loaded: LoadedExtensions };
+/**
+ * One question round as the Boss read it: the title on the dialog, and the text in it, answer line
+ * included. The Boss answers on that last line, and the answer the test gave goes there.
+ */
+type RoundReading = { title: string; text: string };
+
+/** What one in-process session leaves a test to read: the notices and rounds it showed, and what pi loaded. */
+type SessionReadings = { notices: Notice[]; rounds: RoundReading[]; loaded: LoadedExtensions };
 
 /**
  * A real pi session that loads the package, with the Boss's screen standing in at the UI edge, kept
@@ -647,13 +813,20 @@ type OpenSession = SessionReadings & {
  */
 async function openSession(workspace: Workspace): Promise<OpenSession> {
 	const notices: Notice[] = [];
+	const rounds: RoundReading[] = [];
 	let editor = "";
-	// pi types the whole UI port; only the two calls the Shaper uses are implemented, so the cast
-	// avoids a stand-in full of no-ops. The notices and the editor text are what the Boss would read.
+	// pi types the whole UI port; only the calls the Shaper uses are implemented, so the cast avoids
+	// a stand-in full of no-ops. The notices, the rounds and the editor text are what the Boss reads.
 	const ui = {
 		notify: (message: string, type?: Notice["type"]) => notices.push({ message, type }),
 		setEditorText: (text: string) => {
 			editor = text;
+		},
+		// The round's dialog opens with the round and the answer line the Boss types after. A test
+		// that gives no answer dismisses the dialog, as the Boss does with escape.
+		editor: async (title: string, prefill?: string) => {
+			rounds.push({ title, text: prefill ?? "" });
+			return workspace.answer === undefined ? undefined : `${prefill ?? ""} ${workspace.answer}`;
 		},
 	} as unknown as ExtensionUIContext;
 	const restore = applyPiEnvironment(workspace);
@@ -689,6 +862,7 @@ async function openSession(workspace: Workspace): Promise<OpenSession> {
 		}
 		return {
 			notices,
+			rounds,
 			loaded,
 			// The TUI clears the editor when the Boss submits, so the stand-in does too; the Shaper's own
 			// setEditorText call puts the shaped text back before the prompt returns handled.
@@ -733,7 +907,7 @@ async function withSession<T>(workspace: Workspace, run: (session: OpenSession) 
 async function promptInSession(workspace: Workspace, text: string): Promise<SessionReadings> {
 	return withSession(workspace, async (session) => {
 		await session.prompt(text);
-		return { notices: session.notices, loaded: session.loaded };
+		return { notices: session.notices, rounds: session.rounds, loaded: session.loaded };
 	});
 }
 
@@ -1226,6 +1400,8 @@ test("the context the scout finds fills its element, and the Boss is told the sc
 			[SCOUTING_NOTICE, SCOUT_FILLED_NOTICE],
 			"the Boss is told the scout is looking before it starts, then that the shape carries what it found",
 		);
+		assert.deepEqual(session.rounds, [], "no question was put to the Boss about the element the scout answered");
+		assert.equal(askRequests(workspace).length, 0, "no question round was written for a gap the scout filled");
 		assert.equal(mainRequests(workspace).length, 0, "the shape waits in the editor; nothing reached the main model");
 	});
 });
@@ -1364,4 +1540,152 @@ test("the Shaper asks the session's own model to infer from the repo, the branch
 		assert.ok(reading.endsWith(`Prompt as typed:\n${SHORT_NO_CONTEXT}`), "the inference reads the prompt as typed");
 		assert.ok(call.system.includes("every word of a fill must appear in it"), "the inference is told a fill has to be the session's own words");
 	});
+});
+
+test("an element nothing could answer is put to the Boss as one numbered round, each question with a suggested answer", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, check: NO_CONTEXT_CHECK, ask: CONTEXT_ASK });
+	const { rounds } = await promptInSession(workspace, SHORT_NO_CONTEXT);
+	assert.deepEqual(
+		rounds,
+		[{ title: ROUND_TITLE, text: CONTEXT_ROUND }],
+		"the Boss reads one round: the question, numbered, with the answer the Shaper suggests, and a line to answer after",
+	);
+});
+
+test("the round asks only the element neither the session nor the scout could answer, not the one the session filled", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_NO_DONE_WHEN_CHECK,
+		infer: NOTES_CONTEXT_INFER,
+		ask: DONE_WHEN_ASK,
+	});
+	writeNotes(workspace, NOTES_FACT);
+	const { rounds } = await promptInSession(workspace, SHORT_NO_CONTEXT_NO_DONE_WHEN);
+	assert.deepEqual(
+		rounds,
+		[{ title: ROUND_TITLE, text: DONE_WHEN_ROUND }],
+		"the round asks the done-when and says nothing about the context the project's notes already filled",
+	);
+});
+
+test("answering yes accepts every suggestion, and the shaped prompt comes back with both fills under their headers", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_NO_DONE_WHEN_CHECK,
+		infer: NOTES_CONTEXT_INFER,
+		ask: DONE_WHEN_ASK,
+		reshape: NO_CONTEXT_NO_DONE_WHEN_FIELDS,
+		answer: "yes",
+	});
+	writeNotes(workspace, NOTES_FACT);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT_NO_DONE_WHEN);
+		assert.equal(
+			session.editorText(),
+			bothFilledShape(NOTES_CONTEXT_FILL, DONE_WHEN_SUGGESTION),
+			"the editor holds the prompt under the four headers, with the session's context and the Boss's accepted answer",
+		);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[BOTH_FILLED_NOTICE],
+			"the Boss is told which source filled each element",
+		);
+		assert.equal(mainRequests(workspace).length, 0, "the shape waits in the editor; nothing reached the main model");
+	});
+});
+
+test("an answer given by question number fills that element with the Boss's words, and the reshape proceeds", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_NO_DONE_WHEN_CHECK,
+		ask: TWO_QUESTION_ASK,
+		reshape: NO_CONTEXT_NO_DONE_WHEN_FIELDS,
+		answer: TWO_NUMBERED_ANSWERS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT_NO_DONE_WHEN);
+		assert.equal(
+			session.editorText(),
+			bothFilledShape(BOSS_CONTEXT_ANSWER, BOSS_DONE_WHEN_ANSWER),
+			"the editor holds the shape with the Boss's own words under both headers, not the suggestions",
+		);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			["Shaper: shaped. context, done-when filled by your answer. alt+r restores your words."],
+			"the Boss is told both elements carry words he supplied",
+		);
+	});
+});
+
+test("a round of one question may be answered in the Boss's words without its number", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_DONE_WHEN_ONLY_CHECK,
+		ask: DONE_WHEN_ASK,
+		reshape: NO_DONE_WHEN_FIELDS,
+		answer: BOSS_DONE_WHEN_ANSWER,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_DONE_WHEN);
+		assert.equal(
+			session.editorText(),
+			doneWhenFilledShape(BOSS_DONE_WHEN_ANSWER),
+			"the editor holds the shape with the Boss's answer under Done-when",
+		);
+	});
+});
+
+test("a round the Boss dismisses leaves its questions open, and the prompt goes on as typed", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_NO_DONE_WHEN_CHECK,
+		ask: TWO_QUESTION_ASK,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT_NO_DONE_WHEN);
+		assert.deepEqual(
+			session.rounds,
+			[{ title: ROUND_TITLE, text: TWO_QUESTION_ROUND }],
+			"the Boss read one round numbering both questions before he dismissed it",
+		);
+		assert.equal(session.editorText(), "", "nothing is put in the editor while the questions are open");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[
+				"Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when marked for a question",
+			],
+			"the Boss is told which elements stayed open rather than being asked a second round",
+		);
+		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
+		assert.deepEqual(scoutCalls(workspace), [], "no lookup was started for a gap only the Boss could answer");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_NO_CONTEXT_NO_DONE_WHEN,
+			"the main model received the words as typed",
+		);
+	});
+});
+
+test("the round is asked of the session's own model once, with the facts the session carries and the words a suggestion has room for", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		ask: CONTEXT_ASK,
+	});
+	initRepo(workspace, BRANCH);
+	writeNotes(workspace, NOTES_FACT);
+	await promptInSession(workspace, SHORT_NO_CONTEXT);
+	const [call, ...extra] = askRequests(workspace);
+	assert.equal(extra.length, 0, "the Shaper asked for one question round");
+	assert.equal(call.model, "main", "the round is written on the session's own model");
+	const reading = call.messages.at(-1) ?? "";
+	assert.ok(reading.includes(`Repo:\n${workspace.dir}`), "the question writer reads the repo the session runs in");
+	assert.ok(reading.includes(`Branch:\n${BRANCH}`), "the question writer reads the branch the session is on");
+	assert.ok(reading.includes(NOTES_FACT), "the question writer reads the project's own notes");
+	assert.ok(reading.endsWith(`Prompt as typed:\n${SHORT_NO_CONTEXT}`), "the question writer reads the prompt as typed");
+	assert.ok(call.system.includes("Ask about these elements and no others: context."), "the round asks only the element nothing could answer");
+	assert.ok(
+		call.system.includes("at most 26 words"),
+		"each suggested answer is told the words the reshape cap leaves: 51 less the prompt's 17 and the headers' 8",
+	);
 });

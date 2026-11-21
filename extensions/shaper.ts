@@ -1,41 +1,48 @@
 /**
  * pi-shaper: the Shaper lifts thin typed prompts toward a consistent high-quality shape.
  *
- * This slice is the cascade's second step, the scout. With shaping on, the Shaper asks the session's
- * own model which of the four standing elements a typed prompt carries: goal, context, constraints
- * and done-when (see GLOSSARY.md). A short prompt that leaves an element missing has the absent
- * ones filled from what the session already knows (the repo, the branch, what the project's Beads
- * remember, the conversation so far and the project's own notes), and each gap the session can
- * place but not fill is sent to the scout agent, which looks it up with the read tools its own
- * definition names and never a tool that writes. What the scout finds fills the element with the
- * scout's own words, cut to the words the reshape's cap leaves for it, so a lookup is never thrown
- * away; what it cannot find is marked for a question, never guessed. The Shaper holds no lookup of
- * its own: it asks for one, and nothing else. The Boss is told while a lookup runs, so a scout that
- * takes its time never reads as a frozen editor.
+ * This slice is the cascade's last resort, the question round. With shaping on, the Shaper asks the
+ * session's own model which of the four standing elements a typed prompt carries: goal, context,
+ * constraints and done-when (see GLOSSARY.md). A short prompt that leaves an element missing has
+ * the absent ones filled from what the session already knows (the repo, the branch, what the
+ * project's Beads remember, the conversation so far and the project's own notes), and each gap the
+ * session can place but not fill is sent to the scout agent, which looks it up with the read tools
+ * its own definition names and never a tool that writes. What the scout finds fills the element
+ * with the scout's own words, cut to the words the reshape's cap leaves for it, so a lookup is
+ * never thrown away. The Shaper holds no lookup of its own: it asks for one, and nothing else. The
+ * Boss is told while a lookup runs, so a scout that takes its time never reads as a frozen editor.
+ *
+ * What neither the session nor the scout could answer becomes exactly one round of questions, put
+ * to the Boss in the grilling skill's format: each question numbered, each with the answer the
+ * Shaper suggests, and one word, yes, accepts every suggestion. The questions are asked of the
+ * session's own model, which states the facts the session has for each, so the round asks only what
+ * only the Boss knows. The answers fill their elements, and the reshape goes on with them.
  *
  * Nothing is invented: a fill from the session survives only when every word of it is a word the
  * session itself carries. A short prompt whose four elements are then all there is reshaped: words
  * moved under the four headers, put in the editor for the Boss to accept or edit, never sent by
  * itself. The original is kept, and one press of `alt+r` puts it back in the editor. A prompt that
- * still has a gap is reported element by element and goes on as typed.
+ * still has a gap, because a question went unanswered, is reported element by element and goes on
+ * as typed, and no second round is asked.
  *
  * Shaping is opt-in under the `shaper.enabled` setting, which is off when it is absent, so the
  * Tweaker's silence stays the default (pp-csw).
  *
- * The check, the inference, the scout and the reshape all fail open: a model that cannot be
- * reached, a reply that is not the one asked for, a fill the session's words do not carry, a scout
- * definition that cannot be read or a scout that cannot run, or a reshape that changes the words it
- * was given or runs past the length cap leaves the prompt to go on as typed, and puts nothing in the
- * editor. A mode with no UI (print, JSON) has no editor for a shape to wait in, so its prompt goes
- * on unchecked.
+ * The check, the inference, the scout, the question round and the reshape all fail open: a model
+ * that cannot be reached, a reply that is not the one asked for, a fill the session's words do not
+ * carry, a scout definition that cannot be read or a scout that cannot run, a round the Boss
+ * dismisses, or a reshape that changes the words it was given or runs past the length cap leaves the
+ * prompt to go on as typed, and puts nothing in the editor. A mode with no UI (print, JSON) has no
+ * editor for a shape or a question to wait in, so its prompt goes on unchecked.
  *
  * The seam is the real pi session (see tests/shaper.test.ts): this file wires pi's `input` event
- * to the Shaper, the check, the inference and the reshape speak to the session's model through
- * `ctx.modelRegistry.streamSimple()` so pi's own credentials and model choice are used, the scout
- * runs as a pi process of its own so the Shaper never holds a lookup tool, and the report and the
- * shaped text reach the Boss through `ctx.ui.notify()` and `ctx.ui.setEditorText()`, the same
- * notices and editor the tests read. The one-key revert is pi's shortcut, registered as `alt+r`,
- * and the tests press it through pi's shortcut registry.
+ * to the Shaper, the check, the inference, the question round and the reshape speak to the
+ * session's model through `ctx.modelRegistry.streamSimple()` so pi's own credentials and model
+ * choice are used, the scout runs as a pi process of its own so the Shaper never holds a lookup
+ * tool, and the report, the round and the shaped text reach the Boss through `ctx.ui.notify()`,
+ * `ctx.ui.editor()` and `ctx.ui.setEditorText()`, the same notices, dialog and editor the tests
+ * read. The one-key revert is pi's shortcut, registered as `alt+r`, and the tests press it through
+ * pi's shortcut registry.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -85,8 +92,8 @@ type ElementState =
 	| { element: StandingElement; standing: "scout"; place: string }
 	| { element: StandingElement; standing: "filled"; words: string; source: FillSource };
 
-/** Who supplied the words an element is filled with: the session's own sources, or the scout. */
-type FillSource = "session" | "scout";
+/** Who supplied the words an element is filled with: the session, the scout, or the Boss's answer. */
+type FillSource = "session" | "scout" | "answer";
 
 /**
  * The first line of the check's instructions, so a provider that stands in for the session's model
@@ -443,19 +450,23 @@ function inferenceFor(
  * call answers for all of them, and each answer is read against the session's own words, so what
  * comes back is either a fill from those words, a place to look, or a question. A model that cannot
  * be reached or a reply that is not one JSON object decides nothing, leaving every absent element a
- * plain gap.
+ * plain gap. The session context comes back with the decisions, because the round that follows asks
+ * its questions with the same facts rather than reading the session a second time.
  */
 async function inferAbsent(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	prompt: string,
 	absent: readonly StandingElement[],
-): Promise<Map<StandingElement, Inference>> {
+): Promise<{ decisions: Map<StandingElement, Inference>; session: SessionContext }> {
 	const session = await sessionContext(pi, ctx);
 	const reply = await askModel(ctx, inferContext(prompt, session.text, absent));
 	const reported = reply === undefined ? undefined : readJsonObject(reply);
-	if (reported === undefined) return new Map();
-	return new Map(absent.map((element) => [element, inferenceFor(reported, element, session.words)]));
+	const decisions =
+		reported === undefined
+			? new Map<StandingElement, Inference>()
+			: new Map(absent.map((element) => [element, inferenceFor(reported, element, session.words)]));
+	return { decisions, session };
 }
 
 /**
@@ -712,6 +723,7 @@ type Fill = { element: StandingElement; words: string; source: FillSource };
 const FILL_SOURCE_PHRASES: Record<FillSource, string> = {
 	session: "from the session",
 	scout: "by the scout",
+	answer: "by your answer",
 };
 
 /** The fills a prompt's state carries, ready for the reshape and the notice. */
@@ -742,6 +754,168 @@ function standingPhrase(state: ElementState): string {
 function thinPromptNotice(states: readonly ElementState[]): string {
 	const elements = states.map((state) => `${state.element} ${standingPhrase(state)}`).join("; ");
 	return `Shaper: thin prompt. ${elements}`;
+}
+
+/**
+ * The first line of the question round's instructions, so a provider that stands in for the
+ * session's model can tell the round from the check, the inference and the reshape
+ * (tests/fixtures/shaper-test-provider.ts).
+ */
+const ASK_MARK = "You are the Shaper's question round.";
+
+/**
+ * What the Shaper asks the session's own model: the one question each unanswerable element gets,
+ * and the answer the Shaper suggests. The round is the grilling skill's, so one word, yes, accepts
+ * every suggestion, and the Boss can also answer by number. The question states the facts the
+ * session has for it, so the Boss answers what only he knows without looking anything up.
+ */
+const askInstructions = (elements: readonly StandingElement[], budget: number): string => `${ASK_MARK}
+Write one question round for the standing elements one typed prompt lacks, in the grilling format:
+one numbered question per element, each with the answer you would suggest.
+
+${ELEMENT_GUIDE}
+
+Ask about these elements and no others: ${elements.join(", ")}. Nothing else could answer them.
+The session's own sources were read for each, and the scout agent was sent for every one where an
+answer could be placed, and neither found it, so only the Boss can answer. Put the facts you have
+that bear on the question directly above it, and word both so one word, yes, accepts the answer
+you suggest. Keep each suggested answer to at most ${budget} words: the reshaped prompt has to stay
+inside its length cap, and a longer answer would be lost.
+
+Answer with one JSON object and nothing else, one entry per element, keyed by the element's name:
+
+{"context": {"question": "<the question to put to the Boss>", "suggested": "<the answer you suggest>"}}`;
+
+/** One question the round puts to the Boss, and the answer the Shaper suggests for it. */
+type AskedQuestion = { element: StandingElement; question: string; suggested: string };
+
+/** The request the round sends: its instructions, the session context, and the prompt as typed. */
+function askContext(prompt: string, context: string, elements: readonly StandingElement[], budget: number): Context {
+	const text = `The prompt lacks: ${elements.join(", ")}.
+
+${context}
+
+Prompt as typed:
+${prompt}`;
+	return {
+		systemPrompt: askInstructions(elements, budget),
+		messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
+	};
+}
+
+/**
+ * Read the model's reply as one question and one suggested answer per element asked about, or
+ * `undefined` when it is not that. A question or an answer that is absent or empty leaves the round
+ * unusable, so the Boss is never shown half a round.
+ */
+function readQuestions(reply: string, elements: readonly StandingElement[]): AskedQuestion[] | undefined {
+	const reported = readJsonObject(reply);
+	if (reported === undefined) return undefined;
+	const questions: AskedQuestion[] = [];
+	for (const element of elements) {
+		const entry = reported[element];
+		if (typeof entry !== "object" || entry === null) return undefined;
+		const { question, suggested } = entry as { question?: unknown; suggested?: unknown };
+		if (typeof question !== "string" || question.trim() === "") return undefined;
+		if (typeof suggested !== "string" || suggested.trim() === "") return undefined;
+		questions.push({ element, question: question.trim(), suggested: suggested.trim() });
+	}
+	return questions;
+}
+
+/** The title on the dialog the round waits in, so the Boss knows which work it is about. */
+const ROUND_TITLE = "Shaper: one question round";
+
+/** The line the Boss answers after, at the end of the round: the round stays above it, unedited. */
+const ANSWER_MARKER = "Your answer:";
+
+/**
+ * The round the Boss reads, in the grilling skill's format: the round's number, how one word answers
+ * it, and each question numbered with the answer the Shaper suggests under it. The questions are
+ * numbered in the order the elements are read and in the order the Boss answers them.
+ */
+function renderRound(questions: readonly AskedQuestion[]): string {
+	const head = "**Round 1**\n\nAnswer yes to accept every suggestion, or answer by number, as Q1: no, ...";
+	const asked = questions
+		.map(
+			({ element, question, suggested }, index) =>
+				`❓ **Q${index + 1}** - **${element}**\n\n${question}\n\n➡️ ${suggested}`,
+		)
+		.join("\n\n---\n\n");
+	return `${head}\n\n${asked}`;
+}
+
+/** What the Boss left in the round's dialog after the answer line, or nothing when it is gone. */
+function answerText(dialog: string): string {
+	const marker = dialog.lastIndexOf(ANSWER_MARKER);
+	return marker === -1 ? "" : dialog.slice(marker + ANSWER_MARKER.length).trim();
+}
+
+/** The word that accepts a suggestion, and its usual kins, at the start of what the Boss says. */
+const ACCEPTS = /^(?:yes|y|yep|yeah|sure|ok|okay|accept)\b/i;
+
+/**
+ * The fills the Boss's answer gives, one per question it answers, or `undefined` when it answers
+ * none. One word accepts every suggestion. Otherwise a line headed by the question's number, as
+ * `Q1: ...`, answers that question in the Boss's own words; a word of acceptance on that line takes
+ * the suggestion instead. A round of one question may be answered in the Boss's words without the
+ * number, since there is only one answer to give.
+ */
+function answerFills(answer: string, questions: readonly AskedQuestion[]): Map<StandingElement, string> | undefined {
+	const said = answer.trim();
+	const fills = new Map<StandingElement, string>();
+	if (said !== "" && ACCEPTS.test(said) && !/\bQ\d+\b/i.test(said)) {
+		for (const { element, suggested } of questions) fills.set(element, suggested);
+		return fills;
+	}
+	if (questions.length === 1 && !/\bQ\d+\b/i.test(said) && said !== "") {
+		fills.set(questions[0].element, said);
+		return fills;
+	}
+	const answered = new Map<number, string>();
+	for (const line of said.split("\n")) {
+		const match = /^\s*\*{0,2}Q(\d+)\*{0,2}\s*[:.-]?\s*(.*)$/i.exec(line);
+		if (match === null) continue;
+		const text = match[2].trim();
+		if (text !== "") answered.set(Number(match[1]), text);
+	}
+	questions.forEach(({ element, suggested }, index) => {
+		const saidForIt = answered.get(index + 1);
+		if (saidForIt === undefined) return;
+		fills.set(element, ACCEPTS.test(saidForIt) ? suggested : saidForIt);
+	});
+	return fills.size === 0 ? undefined : fills;
+}
+
+/**
+ * The cascade's last resort: every element the session and the scout could not answer becomes one
+ * numbered question round with a suggested answer each, and the Boss's answers fill them. The round
+ * is asked of the session's own model, which states what the session knows for each question, and it
+ * waits in pi's editor for the Boss, so a round never arrives mid-sentence. A reply that is not a
+ * round, or a round the Boss dismisses or answers nothing in, leaves the gaps where they were, and
+ * nothing is asked twice.
+ */
+async function askRound(
+	ctx: ExtensionContext,
+	prompt: string,
+	states: readonly ElementState[],
+	session: SessionContext,
+): Promise<ElementState[]> {
+	const gaps = states.filter((state) => state.standing === "ask").map(({ element }) => element);
+	if (gaps.length === 0) return [...states];
+	const budget = scoutBudget(prompt, fillsOf(states), gaps.length);
+	if (budget < 1) return [...states];
+	const reply = await askModel(ctx, askContext(prompt, session.text, gaps, budget));
+	const questions = reply === undefined ? undefined : readQuestions(reply, gaps);
+	if (questions === undefined) return [...states];
+	const dialog = await ctx.ui.editor(ROUND_TITLE, `${renderRound(questions)}\n\n${ANSWER_MARKER}`);
+	const fills = dialog === undefined ? undefined : answerFills(answerText(dialog), questions);
+	if (fills === undefined) return [...states];
+	return states.map((state): ElementState => {
+		if (state.standing !== "ask") return state;
+		const words = fills.get(state.element);
+		return words === undefined ? state : { element: state.element, standing: "filled", words, source: "answer" };
+	});
 }
 
 /**
@@ -996,16 +1170,20 @@ export default function shaper(pi: ExtensionAPI): void {
 			return { action: "continue" };
 		}
 		// The cascade's first step: the session fills what it knows, and the second sends every gap it can
-		// place but not fill to the scout. What comes back is a fill, or a question for what no lookup could
-		// answer; the Shaper itself never looks anything up.
-		const decisions = absent.length === 0 ? undefined : await inferAbsent(pi, ctx, event.text, absent);
-		const states = await placeGaps(pi, ctx, event.text, statesOf(report, decisions));
+		// place but not fill to the scout. What comes back is a fill; the Shaper itself never looks
+		// anything up.
+		const inferred = absent.length === 0 ? undefined : await inferAbsent(pi, ctx, event.text, absent);
+		const states = await placeGaps(pi, ctx, event.text, statesOf(report, inferred?.decisions));
+		// The last resort: what neither the session nor the scout could answer goes to the Boss as one
+		// round of questions, and his answers fill their elements.
+		const answered =
+			inferred === undefined ? [...states] : await askRound(ctx, event.text, states, inferred.session);
 		// A prompt that still has a gap is reported element by element and goes on as typed.
-		if (states.some(isGap)) {
-			ctx.ui.notify(thinPromptNotice(states), "info");
+		if (answered.some(isGap)) {
+			ctx.ui.notify(thinPromptNotice(answered), "info");
 			return { action: "continue" };
 		}
-		const fills = fillsOf(states);
+		const fills = fillsOf(answered);
 		const shaped = await reshape(ctx, event.text, fills);
 		if (shaped === undefined) return { action: "continue" };
 		// The reshape waits in the editor for the Boss; returning handled keeps it from sending itself.
