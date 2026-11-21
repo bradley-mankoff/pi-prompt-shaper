@@ -97,6 +97,49 @@ editor for accept or edit, and the original is kept for revert. Of that, this sl
 check, the inference from the session, the scout lookup, the question round, the reshape of a
 prompt whose elements are all there, the editor review and the one-key revert.
 
+## Does it lift?
+
+The tests prove the Shaper behaves as designed; they do not prove the design helps. `npm run eval`
+measures that, separately from `npm test`. It replays twelve thin prompts across the task types the
+Boss types (bug, feature, refactor, test, review, docs and chore), each with the clear variant he
+would have typed, in four arms: the thin prompt and the clear prompt, each with shaping off and on.
+A main agent with no tools answers each prompt in a real pi session; a judge model checks the
+answer against the case's named facts (the file, the change, the constraint and the check the full
+task states) and names the ones it does not state; the harness sends the missing facts back as one
+correction turn, until the judge finds nothing missing or three turns pass. The workspace is
+a git repo on the case's branch with the case's context in a Beads memory, and its agent folder has
+no scout, so the Shaper fills from the session and puts any remaining gap to the question round,
+which the harness answers with yes. The clear arms are the control: a judge that asks for
+corrections on a complete prompt would be measuring itself, not the Shaper.
+
+`npm run eval` prints the mean correction turns for each arm and the lift as one number: the thin
+prompts without shaping minus the same prompts with shaping. It needs pi's credentials, `bd` on
+PATH for the Beads memory in each workspace, and the network. It takes minutes and is not part of
+`npm test`. `--model provider/id` and `--judge
+provider/id` choose the models (the defaults are `opencode-go/kimi-k3.1-pro` and
+`opencode-go/deepseek-v4.1-flash`), `--limit n` runs a prefix of the corpus, `--verbose` prints
+each reply and correction, and `--keep` leaves the temporary workspaces and their Correction logs
+on disk.
+
+A recorded run on 2026-11-21 gave:
+
+```
+Shaper lift: 0.67 correction turns per task (thin prompts: 1.08 without shaping, 0.42 with)
+
+  arm                    corrections/task   shapes
+  thin, shaping off                  1.08   0/12
+  thin, shaping on                   0.42   10/12
+  clear, shaping off                 0.33   0/12
+  clear, shaping on                  0.00   0/12
+
+  prompts 12 · model opencode-go/kimi-k3.1-pro · judge opencode-go/deepseek-v4.1-flash
+```
+
+The number is a measurement of these twelve prompts with these two models, not a promise about
+every prompt: a thin prompt too short for the reshape's length cap cannot carry the fill, and a
+model that cannot follow the reshape's word-for-word contract produces no shape at all. The harness
+prints the shapes per arm so a run where shaping did nothing is visible.
+
 ## Development
 
 ```bash
@@ -104,7 +147,8 @@ npm test
 ```
 
 The tests drive the seam the Spec names: a real pi session that loads the package, with a test
-provider at the provider edge playing the session's own model. One test asks pi's resource
+provider at the provider edge playing the session's own model. The eval harness is separate (see
+above) and is not run by `npm test`. One test asks pi's resource
 loader which extensions loaded and types a prompt in-process; two more load the package
 directory with the installed `pi` command, one with shaping off and one proving a print-mode
 prompt still goes on because there is no editor to hold it. The shape tests type a prompt
