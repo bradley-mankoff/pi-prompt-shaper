@@ -110,6 +110,9 @@ const SESSION_CONTEXT_FILL = "I'm working in src/queue.ts on the retry bug";
 /** The branch the test workspace's repo is on, so the session knows it without the Boss typing it. */
 const BRANCH = "queue-retry-fix";
 
+/** The remote the test workspace's repo has when a test stages one, so the log has repo facts to carry. */
+const TEST_REMOTE = "https://example.com/boss/pi-shaper-test.git";
+
 /** The project notes the workspace's AGENTS.md carries: where the queue work lives. */
 const NOTES_FACT = "The queue work for this task is in src/queue.ts, where recieve is spelled wrong.";
 
@@ -508,14 +511,16 @@ type WorkspaceOptions = {
 };
 
 /**
- * One temporary Mac: a HOME, an agent folder pi reads its settings from, the test provider's log,
- * a PATH of its own for the scout's pi, and, when a test names them, the answers the session's
- * model and the scout give the Shaper's calls.
+ * One temporary Mac: a HOME, an agent folder pi reads its settings from, a data folder pi writes
+ * the Shaper's Correction log under, the test provider's log, a PATH of its own for the scout's
+ * pi, and, when a test names them, the answers the session's model and the scout give the
+ * Shaper's calls.
  */
 type Workspace = {
 	dir: string;
 	home: string;
 	agentDir: string;
+	data: string;
 	log: string;
 	bin: string;
 	scoutLog: string;
@@ -539,11 +544,13 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 	const dir = mkdtempSync(join(tmpdir(), "pi-shaper-"));
 	const home = join(dir, "home");
 	const agentDir = join(dir, "pi-agent");
+	const data = join(dir, "data");
 	const log = join(dir, "requests.jsonl");
 	const bin = join(dir, "bin");
 	const scoutLog = join(dir, "scout.jsonl");
 	mkdirSync(home, { recursive: true });
 	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(data, { recursive: true });
 	mkdirSync(bin, { recursive: true });
 	// The logs exist, empty, from the start: a test reads one before any call is written, so a
 	// missing file stays a fault instead of answering the same as no call.
@@ -554,6 +561,7 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 		dir,
 		home,
 		agentDir,
+		data,
 		log,
 		bin,
 		scoutLog,
@@ -580,6 +588,13 @@ function runInWorkspace(workspace: Workspace, command: string, args: string[]): 
 /** Make the workspace a git repository on the named branch, so the session has a branch to read. */
 function initRepo(workspace: Workspace, branch: string): void {
 	runInWorkspace(workspace, "git", ["init", "-q", "-b", branch, "."]);
+}
+
+/** What one git command in the workspace prints, trimmed, failing the test when git fails. */
+function gitOutput(cwd: string, args: string[]): string {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+	return result.stdout.trim();
 }
 
 /** Put the project's own notes in the workspace, as AGENTS.md, the file pi loads as its context. */
@@ -645,6 +660,9 @@ const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	...process.env,
 	HOME: workspace.home,
 	PI_CODING_AGENT_DIR: workspace.agentDir,
+	// The Shaper's Correction log is one file outside every repo: under the data folder, as the
+	// Tweaker's is, so a test reads the record instead of reaching the Boss's own log.
+	XDG_DATA_HOME: workspace.data,
 	PI_SKIP_VERSION_CHECK: "1",
 	PI_OFFLINE: "1",
 	PI_TELEMETRY: "0",
@@ -816,6 +834,48 @@ function flagValue(call: ScoutCall, flag: string): string | undefined {
 /** Every request the session's own model answered for the prompt itself, not for the Shaper's calls. */
 function mainRequests(workspace: Workspace): Request[] {
 	return requests(workspace).filter(({ kind }) => kind === "main");
+}
+
+/** The shape of a UUID, as the Correction log's ids are. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** pi's in-memory sessions name themselves with a time-ordered UUID, which need not be version 4. */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** One standing element as the Shaper's Correction log records it. */
+type LoggedElement = { element: string; standing: string; words?: string; source?: string };
+
+/**
+ * One shaped prompt as the Shaper's Correction log keeps it: the Tweaker's record shape, with the
+ * shaped text where the Fixer's fixed text sits and the prompt's elements where its changes sit.
+ */
+type ShapeRecord = {
+	id: string;
+	shapeRecordId?: string;
+	sessionId: string;
+	model: string;
+	thinkingLevel: string;
+	original: string;
+	time: string;
+	durationMs: number;
+	outcome: "shaped" | "kept" | "reverted";
+	shaped: string;
+	elements: LoggedElement[];
+	repoPath: string;
+	remote: string;
+	commit: string;
+	error?: string;
+};
+
+/** Where a test's Shaper Correction log lives: under the data folder piEnv hands pi as XDG_DATA_HOME. */
+const correctionLog = (workspace: Workspace): string => join(workspace.data, "pi-shaper", "corrections.jsonl");
+
+/** Every record in the Shaper's Correction log, in the order it was written. */
+function correctionRecords(path: string): ShapeRecord[] {
+	return readFileSync(path, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as ShapeRecord);
 }
 
 /** One notice the Shaper showed the Boss through pi's UI. */
@@ -1164,6 +1224,117 @@ test("the original restored by revert goes on as the Boss typed it, without anot
 		);
 		assert.equal(reshapeRequests(workspace).length, 1, "the reverted prompt was not reshaped a second time");
 	});
+});
+
+test("a shaped prompt appends one record to the Correction log, with its elements and its outcome", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	const before = Date.now();
+	await promptInSession(workspace, SHORT_COMPLETE);
+	const after = Date.now();
+	const records = correctionRecords(correctionLog(workspace));
+	assert.equal(records.length, 1, "the shape wrote one line, one record");
+	const record = records[0];
+	assert.equal(record.outcome, "shaped", "the prompt reached the editor");
+	assert.equal(record.original, SHORT_COMPLETE, "the text as the Boss typed it");
+	assert.equal(record.shaped, SHAPED, "the shaped text the Boss was shown");
+	assert.deepEqual(
+		record.elements,
+		STANDING_ELEMENTS.map((element) => ({ element, standing: "present" })),
+		"each standing element the prompt carried, in the order the Boss reads them",
+	);
+	assert.match(record.id, UUID, "the record's id is a UUID");
+	assert.match(record.sessionId, SESSION_ID, "the record names the pi session it was typed in");
+	assert.equal(record.model, "shaper-test/main", "the session's own model, as provider and id");
+	assert.equal(record.thinkingLevel, "medium", "the thinking level the session ran the shape at");
+	assert.equal(record.repoPath, workspace.dir, "the folder the prompt was typed in");
+	assert.equal(record.remote, "", "a folder git does not know has no remote");
+	assert.equal(record.commit, "", "and no commit");
+	assert.equal(record.error, undefined, "a shape has no error");
+	assert.ok(
+		Date.parse(record.time) >= before && Date.parse(record.time) <= after,
+		`the time is when the prompt was typed: ${record.time}`,
+	);
+	assert.ok(record.durationMs >= 0, `the run took its measured time: ${record.durationMs}`);
+});
+
+test("the record names each filled element's source and the words that filled it", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		infer: SESSION_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(EARLIER_TURN);
+		answer("check", NO_CONTEXT_CHECK);
+		await session.prompt(SHORT_NO_CONTEXT);
+	});
+	const [record] = correctionRecords(correctionLog(workspace));
+	assert.deepEqual(record.elements, [
+		{ element: "goal", standing: "present" },
+		{ element: "context", standing: "filled", words: SESSION_CONTEXT_FILL, source: "session" },
+		{ element: "constraints", standing: "present" },
+		{ element: "done-when", standing: "present" },
+	]);
+});
+
+test("the Correction log carries the repo facts a later study needs to judge the shape against the code", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	initRepo(workspace, BRANCH);
+	writeFileSync(join(workspace.dir, "README.md"), "the queue fixture\n");
+	runInWorkspace(workspace, "git", ["add", "README.md"]);
+	runInWorkspace(workspace, "git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"]);
+	runInWorkspace(workspace, "git", ["remote", "add", "origin", TEST_REMOTE]);
+	await promptInSession(workspace, SHORT_COMPLETE);
+	const [record] = correctionRecords(correctionLog(workspace));
+	assert.equal(record.repoPath, gitOutput(workspace.dir, ["rev-parse", "--show-toplevel"]));
+	assert.equal(record.remote, TEST_REMOTE);
+	assert.equal(record.commit, gitOutput(workspace.dir, ["rev-parse", "HEAD"]));
+});
+
+test("accepting the shape appends a record that links back to the shaped prompt and says it was kept", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		await session.prompt(session.editorText());
+	});
+	const records = correctionRecords(correctionLog(workspace));
+	assert.deepEqual(records.map(({ outcome }) => outcome), ["shaped", "kept"]);
+	assert.equal(records[1].shapeRecordId, records[0].id, "the kept record names the shape it belongs to");
+	assert.equal(records[1].original, SHORT_COMPLETE);
+	assert.equal(records[1].shaped, SHAPED);
+});
+
+test("one press of the revert key appends a record that says the shape was reverted", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		await session.press("alt+r");
+	});
+	const records = correctionRecords(correctionLog(workspace));
+	assert.deepEqual(records.map(({ outcome }) => outcome), ["shaped", "reverted"]);
+	assert.equal(records[1].shapeRecordId, records[0].id, "the reverted record names the shape it belongs to");
+});
+
+test("a prompt that never reaches the editor writes no Correction log record", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		reshape: NO_CONTEXT_FIELDS,
+	});
+	await promptInSession(workspace, NO_CONTEXT);
+	assert.equal(existsSync(correctionLog(workspace)), false, "a prompt with a gap is reported, not logged as shaped");
+});
+
+test("a Correction log that cannot be written leaves the shaped prompt in the editor", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	const blocked = join(workspace.dir, "blocked-data-home");
+	writeFileSync(blocked, "a file where the data home's folder should be\n");
+	workspace.data = blocked;
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		assert.equal(session.editorText(), SHAPED, "the shape still reached the Boss");
+	});
+	assert.equal(existsSync(join(blocked, "pi-shaper")), false, "the log could not be written");
 });
 
 test("a reshape past the length cap never reaches the editor, and the prompt goes on as typed", async () => {

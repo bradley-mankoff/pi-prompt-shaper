@@ -49,3 +49,9 @@ for what neither the session nor the scout could answer; one word, yes, accepts 
 Each answer has the words the reshape's length cap leaves, and an answer that runs past them is left
 out with a notice that leaves its element open.
 _Avoid_: interview, clarification, follow-up questions
+
+**Correction log**:
+The one JSONL file outside every repo, under pi's data folder, where each shaped prompt, the
+elements it carries, and what became of it (shaped, kept or reverted) are recorded in the record
+shape pi-prompterize's Correction log uses, so a later study can judge the lift.
+_Avoid_: history, audit log, metrics

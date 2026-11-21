@@ -77,6 +77,15 @@ puts the original words back in the editor. A reshape that changes a word or run
 cap (`min(3 x the original's words, 250)`) is dropped, and the prompt goes on as typed. The default
 stays silence.
 
+Every shaped prompt goes to the Correction log: one JSONL file outside every repo, at
+`~/.local/share/pi-shaper/corrections.jsonl` (or under `XDG_DATA_HOME` when it is set). It keeps
+the record shape pi-prompterize's Correction log uses, so the two products can be studied together:
+each record names the session, the model and thinking level, the folder and its repo facts, the
+text as typed, the shaped text, and every standing element with the words and source that filled
+it, and the outcome (`shaped`, `kept` or `reverted`). The shape is written when it reaches the
+editor, and its outcome when the Boss accepts it or presses `alt+r`. A log that cannot be written
+never stops or changes a prompt.
+
 ## What the Shaper will do
 
 The standing elements it checks are goal, context, constraints and done-when, with task-type
