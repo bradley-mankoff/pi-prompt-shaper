@@ -4,7 +4,8 @@
  *
  * This is a separate harness, not part of `npm test` (Spec pp-csw, Testing Decisions). It runs real
  * pi sessions against a real model, so it needs the Boss's credentials in pi's agent folder and a
- * network. For each case in `evals/cases.jsonl` it runs four arms:
+ * network. The corpus in `evals/cases.jsonl` is written by hand for the harness, not drawn from a
+ * Correction log. For each case in it the harness runs four arms:
  *
  * - the thin prompt as the Boss typed it, with shaping off;
  * - the same thin prompt, with shaping on;

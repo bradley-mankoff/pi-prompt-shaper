@@ -82,9 +82,10 @@ Every shaped prompt goes to the Correction log: one JSONL file outside every rep
 the record shape pi-prompterize's Correction log uses, so the two products can be studied together:
 each record names the session, the model and thinking level, the folder and its repo facts, the
 text as typed, the shaped text, and every standing element with the words and source that filled
-it, and the outcome (`shaped`, `kept` or `reverted`). The shape is written when it reaches the
-editor, and its outcome when the Boss accepts it or presses `alt+r`. A log that cannot be written
-never stops or changes a prompt.
+it, and the outcome (`shaped`, `kept`, `reverted` or `edited`). The shape is written when it
+reaches the editor, and its outcome when the Boss accepts it, presses `alt+r`, or sends his own
+edited text from that editor, which the record carries as the `shaped` text. A log that cannot be
+written never stops or changes a prompt.
 
 ## What the Shaper will do
 
@@ -100,13 +101,15 @@ prompt whose elements are all there, the editor review and the one-key revert.
 ## Does it lift?
 
 The tests prove the Shaper behaves as designed; they do not prove the design helps. `npm run eval`
-measures that, separately from `npm test`. It replays twelve thin prompts across the task types the
-Boss types (bug, feature, refactor, test, review, docs and chore), each with the clear variant he
-would have typed, in four arms: the thin prompt and the clear prompt, each with shaping off and on.
-A main agent with no tools answers each prompt in a real pi session; a judge model checks the
-answer against the case's named facts (the file, the change, the constraint and the check the full
-task states) and names the ones it does not state; the harness sends the missing facts back as one
-correction turn, until the judge finds nothing missing or three turns pass. The workspace is
+measures that, separately from `npm test`. The corpus in `evals/cases.jsonl` is written by hand for
+the harness, not taken from the Correction log: twelve thin prompts across the task types the Boss
+types (bug, feature, refactor, test, review, docs and chore), each with the clear variant he would
+have typed. The harness runs each of them in four arms: the thin prompt and the clear prompt, each
+with shaping off and on. A main agent with no tools answers each prompt in a real pi session; a
+judge model checks the answer against the case's named facts (the file, the change, the constraint
+and the check the full task states) and names the ones it does not state; the harness sends the
+missing facts back as one correction turn, until the judge finds nothing missing or three turns
+pass. The workspace is
 a git repo on the case's branch with the case's context in a Beads memory, and its agent folder has
 no scout, so the Shaper fills from the session and puts any remaining gap to the question round,
 which the harness answers with yes. The clear arms are the control: a judge that asks for

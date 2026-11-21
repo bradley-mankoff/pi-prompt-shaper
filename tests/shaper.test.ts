@@ -635,6 +635,17 @@ function writeScoutProcess(workspace: Workspace, reply: string): void {
 }
 
 /**
+ * Put a git on the workspace's PATH that pauses before answering, so a test can act while the
+ * Correction log's repo facts are still being asked for. The installed git answers underneath.
+ */
+function writeSlowGit(workspace: Workspace): void {
+	const installed = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+	const slow = join(workspace.bin, "git");
+	writeFileSync(slow, `#!/bin/sh\nsleep 0.3\nexec "${installed}" "$@"\n`);
+	chmodSync(slow, 0o755);
+}
+
+/**
  * A workspace whose session can place its only gap but not fill it, with the scout staged in the
  * workspace's agent folder and its pi answering the given reply: the setup the scout tests share.
  */
@@ -858,7 +869,7 @@ type ShapeRecord = {
 	original: string;
 	time: string;
 	durationMs: number;
-	outcome: "shaped" | "kept" | "reverted";
+	outcome: "shaped" | "kept" | "reverted" | "edited";
 	shaped: string;
 	elements: LoggedElement[];
 	repoPath: string;
@@ -982,6 +993,17 @@ async function openSession(workspace: Workspace): Promise<OpenSession> {
 	} catch (error) {
 		restore();
 		throw error;
+	}
+}
+
+/** Wait until the Shaper leaves `text` in the editor, and fail the test after a few seconds if it does not. */
+async function waitForEditor(session: OpenSession, text: string): Promise<void> {
+	const deadline = Date.now() + 5000;
+	while (session.editorText() !== text) {
+		if (Date.now() > deadline) {
+			throw new Error(`the editor never held the shape: ${JSON.stringify(session.editorText())}`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
 }
 
@@ -1202,6 +1224,24 @@ test("an edited shaped prompt goes on exactly as the Boss edited it", async () =
 	});
 });
 
+test("a shape sent on with the Boss's edits appends a record that links back and carries the words he sent", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	const edited = `${SHAPED}\n\nAlso keep the docs in step.`;
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_COMPLETE);
+		await session.prompt(edited);
+	});
+	const records = correctionRecords(correctionLog(workspace));
+	assert.deepEqual(
+		records.map(({ outcome }) => outcome),
+		["shaped", "edited"],
+		"the shape is logged as shaped, then with the edit that became of it",
+	);
+	assert.equal(records[1].shapeRecordId, records[0].id, "the edited record names the shape it belongs to");
+	assert.equal(records[1].original, SHORT_COMPLETE, "the record keeps the words the Boss typed");
+	assert.equal(records[1].shaped, edited, "the record carries the words he sent from the shape's editor");
+});
+
 test("one press of the revert shortcut puts the original words back in the editor", async () => {
 	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
 	await withSession(workspace, async (session) => {
@@ -1312,6 +1352,25 @@ test("one press of the revert key appends a record that says the shape was rever
 	});
 	const records = correctionRecords(correctionLog(workspace));
 	assert.deepEqual(records.map(({ outcome }) => outcome), ["shaped", "reverted"]);
+	assert.equal(records[1].shapeRecordId, records[0].id, "the reverted record names the shape it belongs to");
+});
+
+test("a revert pressed while the shape's record is still being written is logged against it", async () => {
+	const workspace = makeWorkspace({ settings: SHAPING_ON, reshape: SHAPED_FIELDS });
+	// The log's repo facts are asked of git, staged slow so the Boss's keypress lands while they run.
+	writeSlowGit(workspace);
+	await withSession(workspace, async (session) => {
+		const typing = session.prompt(SHORT_COMPLETE);
+		await waitForEditor(session, SHAPED);
+		await session.press("alt+r");
+		await typing;
+	});
+	const records = correctionRecords(correctionLog(workspace));
+	assert.deepEqual(
+		records.map(({ outcome }) => outcome),
+		["shaped", "reverted"],
+		"the fate waited for the shape's record instead of being dropped",
+	);
 	assert.equal(records[1].shapeRecordId, records[0].id, "the reverted record names the shape it belongs to");
 });
 
