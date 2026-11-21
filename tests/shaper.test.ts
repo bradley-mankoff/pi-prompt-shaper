@@ -174,7 +174,11 @@ const SCOUT_PLACE = "the queue tests in src/queue.test.ts";
 
 /** The scout agent's own definition, staged in the workspace's agent folder as `agents/scout.md`. */
 const SCOUT_MODEL = "chain/scout";
-const SCOUT_TOOLS = "read, bash, grep, find, ls, write";
+/** The tools the staged definition names, as the Boss's own scout does: the read tools and write. */
+const SCOUT_DEFINITION_TOOLS = "read, bash, grep, find, ls, write";
+
+/** The tools the Shaper runs the scout with: the read tools only, so a lookup leaves no file behind. */
+const SCOUT_READ_TOOLS = "read, bash, grep, find, ls";
 const SCOUT_BODY = "You are a Scout. Look the answer up in the repository and never guess.";
 
 /**
@@ -183,8 +187,31 @@ const SCOUT_BODY = "You are a Scout. Look the answer up in the repository and ne
  */
 const SCOUT_CONTEXT_FILL = "the retry queue tests live in src/queue.test.ts";
 
+/**
+ * What the scout answers when its lookup reads long: 29 words, past the 26 the reshape cap leaves
+ * for SHORT_NO_CONTEXT, so only its first 26 words can land in the shape.
+ */
+const SCOUT_LONG_ANSWER =
+	"the retry queue tests live in src/queue.test.ts, where each retry runs three times before the job is dropped, and the CLI tests read the JSON shape the queue prints";
+
+/** The first 26 words of SCOUT_LONG_ANSWER: the context the shaped prompt carries. */
+const SCOUT_LONG_FILL =
+	"the retry queue tests live in src/queue.test.ts, where each retry runs three times before the job is dropped, and the CLI tests read the JSON shape";
+
+/**
+ * The words the reshape cap leaves the scout for SHORT_NO_CONTEXT: 3 x 17 words is a 51-word cap,
+ * the prompt's own 17 words and the four headers' 8 leave 26, with no other element filled.
+ */
+const SCOUT_WORD_BUDGET = 26;
+
 /** What the scout answers when the place it was sent to does not hold the gap's answer. */
 const SCOUT_NOT_FOUND = "NOT FOUND";
+
+/**
+ * What the Boss is told while the scout looks the only gap up, so a slow lookup never reads as a
+ * frozen editor.
+ */
+const SCOUTING_NOTICE = "Shaper: scouting context.";
 
 /** The notice after a shape whose context the scout filled. */
 const SCOUT_FILLED_NOTICE = "Shaper: shaped. context filled by the scout. alt+r restores your words.";
@@ -381,7 +408,7 @@ function writeBead(workspace: Workspace, key: string, fact: string): void {
  * `~/.pi/agent/agents`: the model and the tools it runs with, and the instructions it follows. An
  * empty tools list leaves the tools line out, as an incomplete definition would.
  */
-function writeScoutAgent(workspace: Workspace, tools: string = SCOUT_TOOLS): void {
+function writeScoutAgent(workspace: Workspace, tools: string = SCOUT_DEFINITION_TOOLS): void {
 	const agents = join(workspace.agentDir, "agents");
 	mkdirSync(agents, { recursive: true });
 	const toolsLine = tools === "" ? "" : `tools: ${tools}\n`;
@@ -1105,7 +1132,7 @@ test("an inference made of a piece of a word the session said is refused, and th
 	});
 });
 
-test("a placeable gap is looked up by the scout agent with its own definition, tools and the place to look", async () => {
+test("a placeable gap is looked up by the scout agent with its own definition, the read tools and the place to look", async () => {
 	const workspace = makeWorkspace({
 		settings: SHAPING_ON,
 		check: NO_CONTEXT_CHECK,
@@ -1120,7 +1147,11 @@ test("a placeable gap is looked up by the scout agent with its own definition, t
 		assert.equal(extra.length, 0, "the Shaper asked the scout once for the one gap");
 		assert.equal(call.cwd, realpathSync(workspace.dir), "the scout looked in the folder the session runs in");
 		assert.equal(flagValue(call, "--model"), SCOUT_MODEL, "the scout ran on the model its own definition names");
-		assert.equal(flagValue(call, "--tools"), SCOUT_TOOLS, "the scout ran with the tools its own definition names");
+		assert.equal(
+			flagValue(call, "--tools"),
+			SCOUT_READ_TOOLS,
+			"the scout ran with the read tools only, though its definition also names write",
+		);
 		assert.equal(
 			flagValue(call, "--append-system-prompt"),
 			SCOUT_BODY,
@@ -1129,6 +1160,11 @@ test("a placeable gap is looked up by the scout agent with its own definition, t
 		const task = call.args.at(-1) ?? "";
 		assert.ok(task.includes(SCOUT_PLACE), "the scout was told the place the session said the answer lives");
 		assert.ok(task.includes(SHORT_NO_CONTEXT), "the scout read the prompt as the Boss typed it");
+		assert.ok(
+			task.includes(`at most ${SCOUT_WORD_BUDGET} words`),
+			"the scout is told the words the reshape cap leaves for its answer",
+		);
+		assert.ok(task.includes("Change no file"), "the scout was told to answer in its message and leave no file behind");
 	});
 });
 
@@ -1146,7 +1182,7 @@ test("a scout definition that names no tools is asked with the read tools only, 
 		const [call] = scoutCalls(workspace);
 		assert.equal(
 			flagValue(call, "--tools"),
-			"read, bash, grep, find, ls",
+			SCOUT_READ_TOOLS,
 			"a scout that names no tools runs with the read tools only, never one that writes",
 		);
 	});
@@ -1170,10 +1206,29 @@ test("the context the scout finds fills its element, and the shaped prompt says 
 		);
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			[SCOUT_FILLED_NOTICE],
-			"the Boss is told the shape carries context the scout looked up",
+			[SCOUTING_NOTICE, SCOUT_FILLED_NOTICE],
+			"the Boss is told the scout is looking before it starts, then that the shape carries what it found",
 		);
 		assert.equal(mainRequests(workspace).length, 0, "the shape waits in the editor; nothing reached the main model");
+	});
+});
+
+test("an answer the scout runs long still fills its element, cut to the words the reshape cap leaves", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	writeScoutAgent(workspace);
+	writeScoutProcess(workspace, SCOUT_LONG_ANSWER);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(
+			session.editorText(),
+			contextFilledShape(SCOUT_LONG_FILL),
+			"the shaped prompt carries the scout's answer, cut to the 26 words the cap leaves",
+		);
 	});
 });
 
@@ -1195,8 +1250,8 @@ test("what the scout cannot find becomes a question, even when the workspace hol
 		assert.equal(session.editorText(), "", "nothing is put in the editor while a gap remains");
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			[CONTEXT_QUESTION_NOTICE],
-			"the gap the scout could not fill is a question for the Boss, not a guess",
+			[SCOUTING_NOTICE, CONTEXT_QUESTION_NOTICE],
+			"the scout's lookup is announced, and the gap it could not fill is a question, not a guess",
 		);
 		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
 		assert.equal(
@@ -1253,6 +1308,26 @@ test("with no scout agent to ask, a placeable gap stays marked for the scout and
 		);
 		assert.deepEqual(scoutCalls(workspace), [], "no scout was started without a scout agent to run");
 		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
+	});
+});
+
+test("a prompt too short to hold a scout's answer is not looked up, and its gap becomes a question", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	writeScoutAgent(workspace);
+	writeScoutProcess(workspace, SCOUT_CONTEXT_FILL);
+	await withSession(workspace, async (session) => {
+		await session.prompt(TINY_COMPLETE);
+		assert.deepEqual(scoutCalls(workspace), [], "no lookup was started that the shape has no room to carry");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			["Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when present"],
+			"the Boss is asked for the element the scout's answer could not fit",
+		);
 	});
 });
 

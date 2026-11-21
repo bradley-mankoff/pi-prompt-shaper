@@ -47,15 +47,19 @@ setting on, the Shaper asks the session's own model which standing elements a ty
 A short prompt (20 words or fewer) that leaves an element missing has the absent ones filled from
 what the session already knows: the repo and branch it runs in, what the project's Beads remember,
 the conversation so far, and the project's own notes (the `AGENTS.md` files pi loads). Each gap the
-session can place but not fill goes to the scout agent, which looks it up with the read tools and
-the model its own definition names, in a process of its own cut off after 30 seconds; the Shaper
-holds no lookup tool and reads nothing itself. What the scout finds fills the element, and what it
-cannot find becomes a question, not a guess. Nothing is invented: a fill from the session is kept
-only when every one of its words is a whole word the session's own sources carry, and an
-unsupported fill becomes a gap. A short prompt whose four elements are then all there comes back
-under the four headers, carrying the typed words, the session's fills and the scout's context, in
-the editor. A prompt that still has a gap is reported element by element and goes on exactly as it
-was typed. Nothing is sent until Enter; `alt+r` puts the original words back in the editor. A
+session can place but not fill goes to the scout agent, in a process of its own cut off after 30
+seconds. The scout runs on the model its own definition names and with the read tools only: the
+Shaper drops `write` and `edit` from whatever the definition names, and tells the scout to leave no
+file behind. The Boss is told while a lookup runs, and the Shaper holds no lookup tool and reads
+nothing itself. The scout is told the words the reshape's cap leaves for its answer, and an answer
+that runs long is cut to that budget rather than thrown away. What the scout finds fills the
+element, and what it cannot find becomes a question, not a guess. Nothing is invented: a fill from
+the session is kept only when every one of its words is a whole word the session's own sources
+carry, and an unsupported fill becomes a gap. A short prompt whose four elements are then all
+there comes back under the four headers, carrying the typed words, the session's fills and the
+scout's context, in the editor. A prompt that still has a gap is reported element by element and
+goes on exactly as it was typed. Nothing is sent until Enter; `alt+r` puts the original words back
+in the editor. A
 reshape that changes a word or runs past the length cap (`min(3 x the original's words, 250)`) is
 dropped, and the prompt goes on as typed. The default stays silence.
 
@@ -88,10 +92,11 @@ repository with a branch, an `AGENTS.md` for the project's notes, and a `bd` mem
 type the thin prompt. The scout tests stage the scout agent's own definition in the workspace's
 agent folder and put a stand-in `pi` on the workspace's PATH, so the process the Shaper starts for
 the scout is a stand-in that records how it was asked and answers with the test's finding; they
-read that record to see the scout ran on its own model, with its own tools, at the place the
-session named, and the editor to see what the Shaper made of the answer. Every test checks what
-the main model received, what the Shaper said, what it asked the session's model or the scout to
-do, or what it left in the editor, never how the extension is built.
+read that record to see the scout ran on its own model, with the read tools only, at the place the
+session named, with the words the reshape's cap leaves, and the editor to see what the Shaper made
+of the answer, including one that runs past that budget. Every test checks what the main model
+received, what the Shaper said, what it asked the session's model or the scout to do, or what it
+left in the editor, never how the extension is built.
 
 ## License
 

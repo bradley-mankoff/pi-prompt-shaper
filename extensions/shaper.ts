@@ -6,10 +6,12 @@
  * and done-when (see GLOSSARY.md). A short prompt that leaves an element missing has the absent
  * ones filled from what the session already knows (the repo, the branch, what the project's Beads
  * remember, the conversation so far and the project's own notes), and each gap the session can
- * place but not fill is sent to the scout agent, which looks it up with the read tools of its own
- * definition. What the scout finds fills the element with the scout's own words; what it cannot
- * find is marked for a question, never guessed. The Shaper holds no lookup of its own: it asks for
- * one, and nothing else.
+ * place but not fill is sent to the scout agent, which looks it up with the read tools its own
+ * definition names and never a tool that writes. What the scout finds fills the element with the
+ * scout's own words, cut to the words the reshape's cap leaves for it, so a lookup is never thrown
+ * away; what it cannot find is marked for a question, never guessed. The Shaper holds no lookup of
+ * its own: it asks for one, and nothing else. The Boss is told while a lookup runs, so a scout that
+ * takes its time never reads as a frozen editor.
  *
  * Nothing is invented: a fill from the session survives only when every word of it is a word the
  * session itself carries. A short prompt whose four elements are then all there is reshaped: words
@@ -457,17 +459,27 @@ async function inferAbsent(
 }
 
 /**
- * The scout agent's own definition: the instructions it runs under, and the model and tools its
- * frontmatter names. The Shaper reads it from the user's agent folder, where pi keeps its agents,
- * and starts the lookup with it, so the Shaper holds no read tool and never looks a gap up itself.
+ * The scout agent's own definition: the instructions it runs under, the model its frontmatter
+ * names, and the read tools it may use, narrowed from the ones its frontmatter names. The Shaper
+ * reads it from the user's agent folder, where pi keeps its agents, and starts the lookup with it,
+ * so the Shaper holds no read tool and never looks a gap up itself.
  */
 type ScoutDefinition = { instructions: string; model?: string; tools: string };
 
 /** The agent a placeable gap goes to: the name its file carries in the agent folder pi reads. */
 const SCOUT_AGENT = "scout";
 
-/** The tools a scout runs with when its definition names none, so a lookup can never change a file. */
-const SCOUT_READ_TOOLS = "read, bash, grep, find, ls";
+/**
+ * The tools a scout may run with: the read tools, plus `bash`, which its own instructions use for
+ * `rg`, `gitnexus` and `curl`. `write` and `edit` are never passed, so the findings file its
+ * instructions describe has no tool to be written with, and the task also tells it to change no
+ * file. bash could still write, and was kept because without it a scout cannot run the lookups its
+ * own definition names.
+ */
+const SCOUT_READ_TOOLS: readonly string[] = ["read", "bash", "grep", "find", "ls"];
+
+/** The read tools as one comma-separated list, the form pi takes on `--tools`. */
+const SCOUT_READ_TOOL_LIST = SCOUT_READ_TOOLS.join(", ");
 
 /** How long one scout lookup may run before the gap goes without it. */
 const SCOUT_TIMEOUT_MS = 30_000;
@@ -496,8 +508,13 @@ function scoutDefinition(): ScoutDefinition | undefined {
 			typeof frontmatter.model === "string" && frontmatter.model.trim() !== ""
 				? frontmatter.model.trim()
 				: undefined;
-		const tools = scoutTools(frontmatter.tools);
-		return { instructions, model, tools: tools.length === 0 ? SCOUT_READ_TOOLS : tools.join(", ") };
+		const named = scoutTools(frontmatter.tools);
+		const readOnly = named.filter((tool) => SCOUT_READ_TOOLS.includes(tool));
+		return {
+			instructions,
+			model,
+			tools: readOnly.length === 0 ? SCOUT_READ_TOOL_LIST : readOnly.join(", "),
+		};
 	} catch {
 		// A missing or malformed definition is no scout to ask, and never a reason the prompt cannot go on.
 		return undefined;
@@ -507,16 +524,33 @@ function scoutDefinition(): ScoutDefinition | undefined {
 /** One gap the scout is asked about: the element, and the place the session said the answer lives. */
 type ScoutGap = { element: StandingElement; place: string };
 
-/** What one question to the scout came back with: the context it found, none there, or no scout to ask. */
-type ScoutLookup = { found: string } | "not-found" | "unavailable";
+/** What one question to the scout came back with: the context it found, or none there. */
+type ScoutLookup = { found: string } | "not-found";
 
-/** The question the Shaper puts to the scout: the gap, the place to look, and the prompt it serves. */
-function scoutTask(prompt: string, gap: ScoutGap): string {
+/**
+ * The words one scout answer may carry and still leave the shape inside the reshape cap. The cap is
+ * counted over the whole shaped prompt, so the prompt's own words, the four headers and any element
+ * the session already filled come out first, and the rest is divided among the gaps: an answer the
+ * cap has no room for would be looked up and then lost, and the Boss would never hear of it.
+ */
+function scoutBudget(prompt: string, fills: readonly Fill[], gaps: number): number {
+	const filled = fills.reduce((words, fill) => words + wordCount(fill.words), 0);
+	const room = reshapeCap(prompt) - wordCount(prompt) - SHAPE_HEADER_WORDS - filled;
+	return Math.floor(room / gaps);
+}
+
+/**
+ * The question the Shaper puts to the scout: the gap, the place to look, the words the shape has
+ * room for, and the prompt it serves. The budget is stated because the reshape drops any shape past
+ * the cap, and an answer that runs long would be lost; the scout is also told to leave no file, so a
+ * lookup puts nothing on disk.
+ */
+function scoutTask(prompt: string, gap: ScoutGap, budget: number): string {
 	return `Look up one gap in a prompt the Boss is typing, so the gap can be filled with what the sources say instead of a guess.
 
 The gap: ${gap.element}. Where the session says it can be looked up: ${gap.place}.
 
-Look it up in one or two reads and answer at once. Give the context itself, copied as the sources state it, in one short paragraph. Answer exactly ${SCOUT_NOT_FOUND} when the place does not hold it.
+Look it up in one or two reads and answer at once. Your final message is the answer and nothing else: the context itself, copied as the sources state it, in at most ${budget} words. Change no file, and name no findings file. Answer exactly ${SCOUT_NOT_FOUND} when the place does not hold it.
 
 The prompt as typed:
 ${prompt}`;
@@ -550,26 +584,41 @@ function scoutAnswer(output: string): string | undefined {
 }
 
 /**
+ * The scout's answer as far as the shape has room for it, cut between words. The scout is asked to
+ * stay inside the budget; when a model runs past it anyway, the whole shape would be dropped and
+ * the lookup lost, so the opening words still land and the Boss sees what the scout found.
+ */
+function withinBudget(answer: string, budget: number): string {
+	return answer
+		.split(/\s+/)
+		.filter(Boolean)
+		.slice(0, budget)
+		.join(" ");
+}
+
+/**
  * Ask the scout agent one question and read what it found. The lookup is a pi process of its own,
  * started with the scout's own definition, so the Shaper holds no read tool and never looks the gap
- * up itself. A missing scout agent, a failed, slow or empty run, and an answer that says the place
- * does not hold the gap all leave the element without a fill.
+ * up itself. A failed, slow or empty run, and an answer that says the place does not hold the gap,
+ * both leave the element without a fill.
  */
 async function askScout(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
+	scout: ScoutDefinition,
 	prompt: string,
 	gap: ScoutGap,
+	budget: number,
 ): Promise<ScoutLookup> {
-	const scout = scoutDefinition();
-	if (scout === undefined) return "unavailable";
 	const args = ["--mode", "json", "-p", "--no-session"];
 	if (scout.model !== undefined) args.push("--model", scout.model);
-	args.push("--tools", scout.tools, "--append-system-prompt", scout.instructions, scoutTask(prompt, gap));
+	args.push("--tools", scout.tools, "--append-system-prompt", scout.instructions, scoutTask(prompt, gap, budget));
 	try {
 		const { code, stdout } = await pi.exec("pi", args, { cwd: ctx.cwd, timeout: SCOUT_TIMEOUT_MS });
 		const answer = code === 0 ? scoutAnswer(stdout) : undefined;
-		return answer === undefined ? "not-found" : { found: answer };
+		if (answer === undefined) return "not-found";
+		const found = withinBudget(answer, budget);
+		return found === "" ? "not-found" : { found };
 	} catch {
 		return "not-found";
 	}
@@ -581,11 +630,22 @@ function placeableGaps(states: readonly ElementState[]): ScoutGap[] {
 }
 
 /**
+ * The notice while the scout looks a gap up, so a slow lookup never reads as a frozen editor: the
+ * Boss pressed Enter and waits for the lookup, which may run up to the scout's timeout.
+ */
+function scoutingNotice(gaps: readonly ScoutGap[]): string {
+	return `Shaper: scouting ${gaps.map(({ element }) => element).join(", ")}.`;
+}
+
+/**
  * The cascade's second step: every gap the session could place but not fill goes to the scout. The
  * lookups run together, each cut off by the scout's own timeout, so a prompt with several gaps
- * waits for the slowest one rather than for all of them one after another. What the scout finds
- * fills its element; a place that does not hold the answer becomes a question; a scout that cannot
- * be asked at all leaves the gap marked for the scout, so the Boss still knows where it stands.
+ * waits for the slowest one rather than for all of them one after another, and the Boss is told
+ * they are running. What the scout finds fills its element; a place that does not hold the answer
+ * becomes a question; a scout that cannot be asked at all leaves the gap marked for the scout, so
+ * the Boss still knows where it stands. A lookup the shape has no room to carry is not started: the
+ * gap becomes a question instead, rather than spending the timeout on an answer that would be cut
+ * away.
  */
 async function placeGaps(
 	pi: ExtensionAPI,
@@ -595,12 +655,21 @@ async function placeGaps(
 ): Promise<ElementState[]> {
 	const gaps = placeableGaps(states);
 	if (gaps.length === 0) return [...states];
-	const lookups = await Promise.all(gaps.map((gap) => askScout(pi, ctx, prompt, gap)));
+	const scout = scoutDefinition();
+	if (scout === undefined) return [...states];
+	const budget = scoutBudget(prompt, fillsOf(states), gaps.length);
+	if (budget < 1) {
+		return states.map((state): ElementState =>
+			state.standing === "scout" ? { element: state.element, standing: "ask" } : state,
+		);
+	}
+	ctx.ui.notify(scoutingNotice(gaps), "info");
+	const lookups = await Promise.all(gaps.map((gap) => askScout(pi, ctx, scout, prompt, gap, budget)));
 	const answers = new Map(gaps.map((gap, index) => [gap.element, lookups[index]] as const));
 	return states.map((state): ElementState => {
 		if (state.standing !== "scout") return state;
 		const lookup = answers.get(state.element);
-		if (lookup === undefined || lookup === "unavailable") return state;
+		if (lookup === undefined) return state;
 		if (lookup === "not-found") return { element: state.element, standing: "ask" };
 		return { element: state.element, standing: "filled", words: lookup.found, source: "scout" };
 	});
@@ -745,6 +814,9 @@ const SHAPE_HEADERS: Record<StandingElement, string> = {
 	constraints: "## Constraints",
 	"done-when": "## Done-when",
 };
+
+/** The words the four headers add to `wordCount`: `##` and the element's name for each. */
+const SHAPE_HEADER_WORDS = STANDING_ELEMENTS.length * 2;
 
 /**
  * Read the model's reshape as one string per element it was asked for, or `undefined` when it is not
