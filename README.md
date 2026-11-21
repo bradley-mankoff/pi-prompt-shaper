@@ -84,8 +84,9 @@ each record names the session, the model and thinking level, the folder and its 
 text as typed, the shaped text, and every standing element with the words and source that filled
 it, and the outcome (`shaped`, `kept`, `reverted` or `edited`). The shape is written when it
 reaches the editor, and its outcome when the Boss accepts it, presses `alt+r`, or sends his own
-edited text from that editor, which the record carries as the `shaped` text. A log that cannot be
-written never stops or changes a prompt.
+edited text from that editor, which the record carries as the `shaped` text. A shape record's
+`durationMs` is the Shaper's own run, and an outcome record's how long the shape waited for the
+Boss, whose answer its `time` records. A log that cannot be written never stops or changes a prompt.
 
 ## What the Shaper will do
 
@@ -109,20 +110,18 @@ with shaping off and on. A main agent with no tools answers each prompt in a rea
 judge model checks the answer against the case's named facts (the file, the change, the constraint
 and the check the full task states) and names the ones it does not state; the harness sends the
 missing facts back as one correction turn, until the judge finds nothing missing or three turns
-pass. The workspace is
-a git repo on the case's branch with the case's context in a Beads memory, and its agent folder has
-no scout, so the Shaper fills from the session and puts any remaining gap to the question round,
-which the harness answers with yes. The clear arms are the control: a judge that asks for
-corrections on a complete prompt would be measuring itself, not the Shaper.
+pass. The workspace is a git repo on the case's branch with the case's context in a Beads memory,
+and its agent folder has no scout, so the Shaper fills from the session and puts any remaining gap
+to the question round, which the harness answers with yes. The clear arms are the control: a judge
+that asks for corrections on a complete prompt would be measuring itself, not the Shaper.
 
 `npm run eval` prints the mean correction turns for each arm and the lift as one number: the thin
 prompts without shaping minus the same prompts with shaping. It needs pi's credentials, `bd` on
 PATH for the Beads memory in each workspace, and the network. It takes minutes and is not part of
-`npm test`. `--model provider/id` and `--judge
-provider/id` choose the models (the defaults are `opencode-go/kimi-k3.1-pro` and
-`opencode-go/deepseek-v4.1-flash`), `--limit n` runs a prefix of the corpus, `--verbose` prints
-each reply and correction, and `--keep` leaves the temporary workspaces and their Correction logs
-on disk.
+`npm test`. `--model provider/id` and `--judge provider/id` choose the models (the defaults are
+`opencode-go/kimi-k3.1-pro` and `opencode-go/deepseek-v4.1-flash`), `--limit n` runs a prefix of the
+corpus, `--verbose` prints each reply and correction, and `--keep` leaves the temporary workspaces
+and their Correction logs on disk.
 
 A recorded run on 2026-11-21 gave:
 

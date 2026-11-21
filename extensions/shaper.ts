@@ -1261,6 +1261,10 @@ type ShapeRecord = RepoFacts & {
 	thinkingLevel: string;
 	original: string;
 	time: string;
+	/**
+	 * How long the Shaper's run took, on the record for the shape itself; on a record for what became
+	 * of it, how long the shape waited in the editor for the Boss's answer.
+	 */
 	durationMs: number;
 	outcome: ShapeOutcome;
 	shaped: string;

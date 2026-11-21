@@ -69,13 +69,14 @@ type EvalCase = {
 /** Which prompt an arm sends. */
 type Variant = "thin" | "clear";
 
+/** An arm's identity: the prompt it sends, and whether shaping is on for it. */
+type ArmKind = { variant: Variant; shaping: boolean };
+
 /** What one arm of one case did. */
 type ArmRun = { turns: number; shapes: number; capped: boolean };
 
 /** One arm's results over every case. */
-type Arm = {
-	variant: Variant;
-	shaping: boolean;
+type Arm = ArmKind & {
 	runs: ArmRun[];
 };
 
@@ -122,6 +123,15 @@ type PiSession = {
 	bindExtensions(bindings: { uiContext: unknown; mode: "tui" }): Promise<void>;
 	messages: PiMessage[];
 	dispose(): void;
+};
+
+/** The models, SDK and options every case's arms share, so an arm takes the harness, not its parts. */
+type Harness = {
+	sdk: PiSdk;
+	runtime: PiRuntime;
+	model: Record<string, unknown>;
+	judgeModel: Record<string, unknown>;
+	options: Options;
 };
 
 /** The text a message carries: its string content, or the text parts of its content. */
@@ -275,14 +285,9 @@ type Replay = {
  * answers a question round with the one word that accepts every suggestion. The session's model
  * plays both the Shaper's model and the main agent, as the product does.
  */
-async function openReplay(
-	sdk: PiSdk,
-	runtime: PiRuntime,
-	model: Record<string, unknown>,
-	workspace: Workspace,
-): Promise<Replay> {
+async function openReplay(harness: Harness, workspace: Workspace): Promise<Replay> {
 	let editor = "";
-	const loader = new sdk.DefaultResourceLoader({
+	const loader = new harness.sdk.DefaultResourceLoader({
 		cwd: workspace.dir,
 		agentDir: workspace.agentDir,
 		additionalExtensionPaths: [root],
@@ -295,14 +300,14 @@ async function openReplay(
 		systemPrompt: AGENT_SYSTEM_PROMPT,
 	});
 	await loader.reload();
-	const { session } = await sdk.createAgentSession({
+	const { session } = await harness.sdk.createAgentSession({
 		cwd: workspace.dir,
 		agentDir: workspace.agentDir,
-		model,
-		modelRuntime: runtime,
+		model: harness.model,
+		modelRuntime: harness.runtime,
 		resourceLoader: loader,
-		sessionManager: sdk.SessionManager.inMemory(workspace.dir),
-		settingsManager: sdk.SettingsManager.create(workspace.dir, workspace.agentDir),
+		sessionManager: harness.sdk.SessionManager.inMemory(workspace.dir),
+		settingsManager: harness.sdk.SettingsManager.create(workspace.dir, workspace.agentDir),
 		// The eval runs at pi's lowest thinking level, so a full corpus finishes in minutes; the
 		// product's own sessions keep whatever level the Boss has set.
 		thinkingLevel: "low",
@@ -334,7 +339,7 @@ async function openReplay(
  * passes through goes to the main agent as typed. A model error stops the replay rather than
  * counting as a correction the Shaper should have prevented.
  */
-async function say(replay: Replay, text: string): Promise<string> {
+async function askAgent(replay: Replay, text: string): Promise<string> {
 	await replay.session.prompt(text);
 	const shaped = replay.takeEditor();
 	if (shaped !== "") await replay.session.prompt(shaped);
@@ -356,14 +361,9 @@ function factsText(entry: EvalCase): string {
  * malformed verdict, not a correction: the harness stops rather than count a turn against a fact
  * the case never named.
  */
-async function judge(
-	runtime: PiRuntime,
-	model: Record<string, unknown>,
-	entry: EvalCase,
-	reply: string,
-): Promise<string[]> {
-	const answer = await runtime.complete(
-		model,
+async function judge(harness: Harness, entry: EvalCase, reply: string): Promise<string[]> {
+	const answer = await harness.runtime.complete(
+		harness.judgeModel,
 		{
 			systemPrompt: JUDGE_INSTRUCTIONS,
 			messages: [
@@ -410,42 +410,38 @@ function shapeCount(dataDir: string): number {
 		.filter(({ outcome }) => outcome === "shaped").length;
 }
 
+/** The word the report and an arm's folder give to whether shaping is on, so they cannot disagree. */
+const shapingWord = (shaping: boolean): string => (shaping ? "on" : "off");
+
 /**
  * One arm of one case: the prompt, the judge's corrections, and the turns they cost. The arm's
  * settings and its Correction log live in a folder of their own, so the four arms of a case never
  * read each other's shapes.
  */
-async function runArm(
-	sdk: PiSdk,
-	runtime: PiRuntime,
-	model: Record<string, unknown>,
-	judgeModel: Record<string, unknown>,
-	workspace: Workspace,
-	entry: EvalCase,
-	variant: Variant,
-	shaping: boolean,
-	options: Options,
-): Promise<ArmRun> {
+async function runArm(harness: Harness, workspace: Workspace, entry: EvalCase, arm: ArmKind): Promise<ArmRun> {
+	const { variant, shaping } = arm;
 	writeFileSync(join(workspace.agentDir, "settings.json"), JSON.stringify({ shaper: { enabled: shaping } }));
-	const dataDir = join(workspace.dir, "data", `${variant}-${shaping ? "on" : "off"}`);
+	const dataDir = join(workspace.dir, "data", `${variant}-${shapingWord(shaping)}`);
 	mkdirSync(dataDir, { recursive: true });
 	const savedDataHome = process.env.XDG_DATA_HOME;
 	process.env.XDG_DATA_HOME = dataDir;
-	const replay = await openReplay(sdk, runtime, model, workspace);
+	const replay = await openReplay(harness, workspace);
 	try {
-		let reply = await say(replay, variant === "thin" ? entry.thin : entry.clear);
-		if (options.verbose) console.error(`    reply: ${reply}`);
+		let reply = await askAgent(replay, variant === "thin" ? entry.thin : entry.clear);
+		if (harness.options.verbose) console.error(`    reply: ${reply}`);
 		let turns = 0;
 		while (turns < MAX_CORRECTION_TURNS) {
-			const missing = await judge(runtime, judgeModel, entry, reply);
+			const missing = await judge(harness, entry, reply);
 			if (missing.length === 0) break;
 			turns += 1;
-			if (options.verbose) console.error(`    missing: ${missing.join(", ")}`);
-			reply = await say(replay, correctionMessage(entry, missing));
-			if (options.verbose) console.error(`    reply: ${reply}`);
+			if (harness.options.verbose) console.error(`    missing: ${missing.join(", ")}`);
+			reply = await askAgent(replay, correctionMessage(entry, missing));
+			if (harness.options.verbose) console.error(`    reply: ${reply}`);
 		}
 		const shapes = shapeCount(dataDir);
-		if (options.verbose) console.error(`    ${variant}/${shaping ? "on" : "off"}: ${turns} turns, ${shapes} shape(s)`);
+		if (harness.options.verbose) {
+			console.error(`    ${variant}/${shapingWord(shaping)}: ${turns} turns, ${shapes} shape(s)`);
+		}
 		return { turns, shapes, capped: turns === MAX_CORRECTION_TURNS };
 	} finally {
 		replay.session.dispose();
@@ -455,28 +451,33 @@ async function runArm(
 }
 
 /** The mean of a list of numbers, or 0 for an empty list. */
-const mean = (values: readonly number[]): number => (values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length);
+const mean = (values: readonly number[]): number =>
+	values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 
 /** How a number is written in the report: two places, so a lift below one still reads. */
-const fixed = (value: number): string => value.toFixed(2);
+const twoPlaces = (value: number): string => value.toFixed(2);
 
 /** The arm's name as the report shows it. */
-const armName = ({ variant, shaping }: Arm): string => `${variant}, shaping ${shaping ? "on" : "off"}`;
+const armName = ({ variant, shaping }: Arm): string => `${variant}, shaping ${shapingWord(shaping)}`;
+
+/** The mean correction turns of one arm, or 0 when it has not run. */
+const meanTurns = (arm: Arm | undefined): number => mean(arm?.runs.map(({ turns }) => turns) ?? []);
 
 /** The report: every arm, then the one number the Bead asks for. */
 function report(arms: Arm[], caseCount: number, options: Options): void {
 	const thinOff = arms.find((arm) => arm.variant === "thin" && !arm.shaping);
 	const thinOn = arms.find((arm) => arm.variant === "thin" && arm.shaping);
-	const lift = mean(thinOff?.runs.map(({ turns }) => turns) ?? []) - mean(thinOn?.runs.map(({ turns }) => turns) ?? []);
+	const lift = meanTurns(thinOff) - meanTurns(thinOn);
 	console.log(
-		`Shaper lift: ${fixed(lift)} correction turns per task (thin prompts: ${fixed(mean(thinOff?.runs.map(({ turns }) => turns) ?? []))} without shaping, ${fixed(mean(thinOn?.runs.map(({ turns }) => turns) ?? []))} with)`,
+		`Shaper lift: ${twoPlaces(lift)} correction turns per task (thin prompts: ${twoPlaces(meanTurns(thinOff))} without shaping, ${twoPlaces(meanTurns(thinOn))} with)`,
 	);
 	console.log("");
 	console.log("  arm                    corrections/task   shapes");
 	for (const arm of arms) {
-		const corrections = mean(arm.runs.map(({ turns }) => turns));
-		const shapes = arm.runs.filter(({ shapes: count }) => count > 0).length;
-		console.log(`  ${armName(arm).padEnd(22)} ${fixed(corrections).padStart(16)}   ${shapes}/${arm.runs.length}`);
+		const shapedRuns = arm.runs.filter(({ shapes: count }) => count > 0).length;
+		console.log(
+			`  ${armName(arm).padEnd(22)} ${twoPlaces(meanTurns(arm)).padStart(16)}   ${shapedRuns}/${arm.runs.length}`,
+		);
 	}
 	console.log("");
 	console.log(`  prompts ${caseCount} · model ${options.model} · judge ${options.judge}`);
@@ -499,6 +500,7 @@ async function main(): Promise<void> {
 	const judgeModel = runtime.getModel(judgeRef.provider, judgeRef.id);
 	if (model === undefined) throw new Error(`the model ${options.model} is not in pi's catalogue`);
 	if (judgeModel === undefined) throw new Error(`the judge ${options.judge} is not in pi's catalogue`);
+	const harness: Harness = { sdk, runtime, model, judgeModel, options };
 
 	const arms: Arm[] = [
 		{ variant: "thin", shaping: false, runs: [] },
@@ -513,9 +515,7 @@ async function main(): Promise<void> {
 			const workspace = prepareWorkspace(entry);
 			workspaces.push(workspace);
 			for (const arm of arms) {
-				arm.runs.push(
-					await runArm(sdk, runtime, model, judgeModel, workspace, entry, arm.variant, arm.shaping, options),
-				);
+				arm.runs.push(await runArm(harness, workspace, entry, arm));
 			}
 		}
 		report(arms, cases.length, options);

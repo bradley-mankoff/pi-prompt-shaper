@@ -590,13 +590,6 @@ function initRepo(workspace: Workspace, branch: string): void {
 	runInWorkspace(workspace, "git", ["init", "-q", "-b", branch, "."]);
 }
 
-/** What one git command in the workspace prints, trimmed, failing the test when git fails. */
-function gitOutput(cwd: string, args: string[]): string {
-	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-	assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
-	return result.stdout.trim();
-}
-
 /** Put the project's own notes in the workspace, as AGENTS.md, the file pi loads as its context. */
 function writeNotes(workspace: Workspace, notes: string): void {
 	writeFileSync(join(workspace.dir, "AGENTS.md"), notes);
@@ -875,7 +868,6 @@ type ShapeRecord = {
 	repoPath: string;
 	remote: string;
 	commit: string;
-	error?: string;
 };
 
 /** Where a test's Shaper Correction log lives: under the data folder piEnv hands pi as XDG_DATA_HOME. */
@@ -1289,7 +1281,6 @@ test("a shaped prompt appends one record to the Correction log, with its element
 	assert.equal(record.repoPath, workspace.dir, "the folder the prompt was typed in");
 	assert.equal(record.remote, "", "a folder git does not know has no remote");
 	assert.equal(record.commit, "", "and no commit");
-	assert.equal(record.error, undefined, "a shape has no error");
 	assert.ok(
 		Date.parse(record.time) >= before && Date.parse(record.time) <= after,
 		`the time is when the prompt was typed: ${record.time}`,
@@ -1324,11 +1315,14 @@ test("the Correction log carries the repo facts a later study needs to judge the
 	runInWorkspace(workspace, "git", ["add", "README.md"]);
 	runInWorkspace(workspace, "git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"]);
 	runInWorkspace(workspace, "git", ["remote", "add", "origin", TEST_REMOTE]);
+	// The commit is read from the ref git kept it in, so the expected value is not the answer to the
+	// same git call the Shaper makes.
+	const commit = readFileSync(join(workspace.dir, ".git", "refs", "heads", BRANCH), "utf8").trim();
 	await promptInSession(workspace, SHORT_COMPLETE);
 	const [record] = correctionRecords(correctionLog(workspace));
-	assert.equal(record.repoPath, gitOutput(workspace.dir, ["rev-parse", "--show-toplevel"]));
-	assert.equal(record.remote, TEST_REMOTE);
-	assert.equal(record.commit, gitOutput(workspace.dir, ["rev-parse", "HEAD"]));
+	assert.equal(record.repoPath, realpathSync(workspace.dir), "the folder git resolves the prompt's repo to");
+	assert.equal(record.remote, TEST_REMOTE, "the repo's first remote");
+	assert.equal(record.commit, commit, "the commit the repo was on");
 });
 
 test("accepting the shape appends a record that links back to the shaped prompt and says it was kept", async () => {
