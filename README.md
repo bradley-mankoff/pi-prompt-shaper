@@ -63,9 +63,11 @@ the grilling skill's format: each question numbered, each with the answer the Sh
 one word, yes, accepts every suggestion. The round opens in pi's dialog with the round itself and a
 line to answer after it, so the Boss can also answer by number, as `Q1: ...`. The questions are
 written by the session's own model, which states the facts the session has for each, and only the
-elements that got through the session and the scout are asked. The answers fill their elements, and
-the reshape goes on with them: one word, yes, and the answered element reads under its header in
-the editor.
+elements that got through the session and the scout are asked. The round states the words each
+answer has room for, since the reshape drops a shape past its length cap; an answer that runs past
+that room is left out with a notice and its element stays open, rather than the Boss's words
+vanishing when the shape is refused. An answer that fits fills its element, and the reshape goes on
+with it: one word, yes, and the answered element reads under its header in the editor.
 
 A short prompt whose four elements are then all there comes back under the four headers, carrying
 the typed words, the session's fills, the scout's context and the Boss's answers, in the editor. A
@@ -108,11 +110,14 @@ read that record to see the scout ran on its own model, with the read tools only
 session named, with the words the reshape's cap leaves, and the editor to see what the Shaper made
 of the answer, including one that runs past that budget. The question round tests stage what the
 session's model writes for the elements nothing else could answer and what the Boss types after the
-round's answer line, so they read the round in the dialog, the shape the answers produce in the
-editor, and the notice that names which source filled each element; one dismisses the round and
-checks that the questions stay open and no second round is asked. Every test checks what the main
-model received, what the Shaper said, what it asked the session's model or the scout to do, or what
-it left in the editor or the round, never how the extension is built.
+round's answer line, so they read the round in the dialog, the words each answer has room for, the
+shape the answers produce in the editor, and the notice that names which source filled each
+element; they answer by number, with a leading no, on one line, and too long for the shape, and one
+dismisses the round and checks that the questions stay open and no second round is asked. One test
+follows the whole cascade: the scout answers NOT FOUND, the round asks the question, and the Boss's
+answer fills the element. Every test checks what the main model received, what the Shaper said, what
+it asked the session's model or the scout to do, or what it left in the editor or the round, never
+how the extension is built.
 
 ## License
 

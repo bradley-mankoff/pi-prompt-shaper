@@ -16,7 +16,10 @@
  * to the Boss in the grilling skill's format: each question numbered, each with the answer the
  * Shaper suggests, and one word, yes, accepts every suggestion. The questions are asked of the
  * session's own model, which states the facts the session has for each, so the round asks only what
- * only the Boss knows. The answers fill their elements, and the reshape goes on with them.
+ * only the Boss knows. The round states the words each answer has room for, because the reshape
+ * drops a shape past its cap; an answer that runs past that room is left out with a notice rather
+ * than vanishing when the shape is refused. Answers that fit fill their elements, and the reshape
+ * goes on with them.
  *
  * Nothing is invented: a fill from the session survives only when every word of it is a word the
  * session itself carries. A short prompt whose four elements are then all there is reshaped: words
@@ -31,8 +34,10 @@
  * The check, the inference, the scout, the question round and the reshape all fail open: a model
  * that cannot be reached, a reply that is not the one asked for, a fill the session's words do not
  * carry, a scout definition that cannot be read or a scout that cannot run, a round the Boss
- * dismisses, or a reshape that changes the words it was given or runs past the length cap leaves the
- * prompt to go on as typed, and puts nothing in the editor. A mode with no UI (print, JSON) has no
+ * dismisses, an answer longer than the room the round stated, or a reshape that changes the words it
+ * was given or runs past the length cap leaves the prompt to go on as typed, and puts nothing in the
+ * editor. An answer that runs past the round's room is the one failure the Boss is told about, with
+ * the element it would have filled left open. A mode with no UI (print, JSON) has no
  * editor for a shape or a question to wait in, so its prompt goes on unchecked.
  *
  * The seam is the real pi session (see tests/shaper.test.ts): this file wires pi's `input` event
@@ -789,6 +794,9 @@ Answer with one JSON object and nothing else, one entry per element, keyed by th
 /** One question the round puts to the Boss, and the answer the Shaper suggests for it. */
 type AskedQuestion = { element: StandingElement; question: string; suggested: string };
 
+/** What the round's answer gave: the fills whose words fit, and the elements whose answers did not. */
+type AnswerReading = { fills: Map<StandingElement, string>; tooLong: StandingElement[] };
+
 /** The request the round sends: its instructions, the session context, and the prompt as typed. */
 function askContext(prompt: string, context: string, elements: readonly StandingElement[], budget: number): Context {
 	const text = `The prompt lacks: ${elements.join(", ")}.
@@ -831,11 +839,17 @@ const ANSWER_MARKER = "Your answer:";
 
 /**
  * The round the Boss reads, in the grilling skill's format: the round's number, how one word answers
- * it, and each question numbered with the answer the Shaper suggests under it. The questions are
- * numbered in the order the elements are read and in the order the Boss answers them.
+ * it, the words each answer has room for, and each question numbered with the answer the Shaper
+ * suggests under it. The questions are numbered in the order the elements are read and in the order
+ * the Boss answers them. The room is stated because the reshape drops a shape past its cap, and an
+ * answer longer than the room would be typed and then lost.
  */
-function renderRound(questions: readonly AskedQuestion[]): string {
-	const head = "**Round 1**\n\nAnswer yes to accept every suggestion, or answer by number, as Q1: no, ...";
+function renderRound(questions: readonly AskedQuestion[], budget: number): string {
+	const head = `**Round 1**
+
+Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
+
+Each answer has room for at most ${budget} words; a longer one is left out.`;
 	const asked = questions
 		.map(
 			({ element, question, suggested }, index) =>
@@ -855,36 +869,93 @@ function answerText(dialog: string): string {
 const ACCEPTS = /^(?:yes|y|yep|yeah|sure|ok|okay|accept)\b/i;
 
 /**
- * The fills the Boss's answer gives, one per question it answers, or `undefined` when it answers
- * none. One word accepts every suggestion. Otherwise a line headed by the question's number, as
- * `Q1: ...`, answers that question in the Boss's own words; a word of acceptance on that line takes
- * the suggestion instead. A round of one question may be answered in the Boss's words without the
- * number, since there is only one answer to give.
+ * A leading no that declines the suggestion, with the comma the round's example invites or alone.
+ * The round shows `Q1: no, ...`, so the decline is the Boss's answer to the suggestion and not his
+ * words for the element; a bare `no` says nothing to fill the element with. A no followed by words
+ * without a break, as in "no errors in the suite", is the Boss's answer and is kept.
  */
-function answerFills(answer: string, questions: readonly AskedQuestion[]): Map<StandingElement, string> | undefined {
+const DECLINES = /^no\s*(?:[,.;:]|$)\s*/i;
+
+/** What the Boss said for one question with a leading decline taken off, which may leave nothing. */
+const answerWithoutDecline = (said: string): string => said.trim().replace(DECLINES, "").trim();
+
+/**
+ * The marker one answer starts with, as the round writes it: `Q1:`. It is looked for anywhere in the
+ * answer, not only at the start of a line, because the Boss may type several answers on one line.
+ */
+const ANSWER_MARKER_WITH_NUMBER = /\*{0,2}\bQ(\d+)\b\*{0,2}\s*[:.-]?\s*/gi;
+
+/**
+ * The Boss's text for each question number, read from the `Q<n>:` markers wherever they sit. The
+ * text runs to the next marker, so answers typed on one line each keep their own words.
+ */
+function answersByNumber(said: string): Map<number, string> {
+	const marks = [...said.matchAll(ANSWER_MARKER_WITH_NUMBER)].map((match) => ({
+		number: Number(match[1]),
+		at: match.index ?? 0,
+		opensAt: (match.index ?? 0) + match[0].length,
+	}));
+	return new Map(
+		marks.map((mark, index) => [
+			mark.number,
+			said.slice(mark.opensAt, index + 1 < marks.length ? marks[index + 1].at : said.length).trim(),
+		] as const),
+	);
+}
+
+/**
+ * The fills the Boss's answer gives, one per question it answers, and the elements whose answers ran
+ * past the room the shape has, or `undefined` when it answers none. One word accepts every
+ * suggestion. Otherwise a line headed by the question's number, as `Q1: ...`, answers that question
+ * in the Boss's own words; a word of acceptance on that line takes the suggestion instead, and a
+ * leading no takes off only the decline. A round of one question may be answered in the Boss's
+ * words without the number, since there is only one answer to give. An answer longer than the
+ * budget the round stated is not used: the reshape would drop the whole shape and the Boss's words
+ * with it, so the element stays open instead.
+ */
+function answerFills(
+	answer: string,
+	questions: readonly AskedQuestion[],
+	budget: number,
+): AnswerReading | undefined {
 	const said = answer.trim();
+	if (said === "") return undefined;
 	const fills = new Map<StandingElement, string>();
-	if (said !== "" && ACCEPTS.test(said) && !/\bQ\d+\b/i.test(said)) {
-		for (const { element, suggested } of questions) fills.set(element, suggested);
-		return fills;
-	}
-	if (questions.length === 1 && !/\bQ\d+\b/i.test(said) && said !== "") {
-		fills.set(questions[0].element, said);
-		return fills;
-	}
-	const answered = new Map<number, string>();
-	for (const line of said.split("\n")) {
-		const match = /^\s*\*{0,2}Q(\d+)\*{0,2}\s*[:.-]?\s*(.*)$/i.exec(line);
-		if (match === null) continue;
-		const text = match[2].trim();
-		if (text !== "") answered.set(Number(match[1]), text);
+	const tooLong: StandingElement[] = [];
+	const take = (element: StandingElement, words: string) => {
+		if (words === "") return;
+		if (wordCount(words) > budget) tooLong.push(element);
+		else fills.set(element, words);
+	};
+	const numbered = answersByNumber(said);
+	if (numbered.size === 0) {
+		if (ACCEPTS.test(said)) {
+			for (const { element, suggested } of questions) take(element, suggested);
+		} else if (questions.length === 1) {
+			take(questions[0].element, answerWithoutDecline(said));
+		}
+		return fills.size === 0 && tooLong.length === 0 ? undefined : { fills, tooLong };
 	}
 	questions.forEach(({ element, suggested }, index) => {
-		const saidForIt = answered.get(index + 1);
+		const saidForIt = numbered.get(index + 1);
 		if (saidForIt === undefined) return;
-		fills.set(element, ACCEPTS.test(saidForIt) ? suggested : saidForIt);
+		take(element, ACCEPTS.test(saidForIt) ? suggested : answerWithoutDecline(saidForIt));
 	});
-	return fills.size === 0 ? undefined : fills;
+	return fills.size === 0 && tooLong.length === 0 ? undefined : { fills, tooLong };
+}
+
+/** The names of a few elements as the notices read them: "done-when", or "context and done-when". */
+function elementList(elements: readonly StandingElement[]): string {
+	if (elements.length === 1) return elements[0];
+	return `${elements.slice(0, -1).join(", ")} and ${elements.at(-1)}`;
+}
+
+/**
+ * The notice when an answer the round took has no room in the shape: the Boss hears that his words or
+ * the suggestion he accepted were left out, and the element stays open for the notice that follows.
+ */
+function answerTooLongNotice(elements: readonly StandingElement[], budget: number): string {
+	return `Shaper: the answer to ${elementList(elements)} runs past the ${budget} words the shape has room for, so it was left out.`;
 }
 
 /**
@@ -908,12 +979,14 @@ async function askRound(
 	const reply = await askModel(ctx, askContext(prompt, session.text, gaps, budget));
 	const questions = reply === undefined ? undefined : readQuestions(reply, gaps);
 	if (questions === undefined) return [...states];
-	const dialog = await ctx.ui.editor(ROUND_TITLE, `${renderRound(questions)}\n\n${ANSWER_MARKER}`);
-	const fills = dialog === undefined ? undefined : answerFills(answerText(dialog), questions);
-	if (fills === undefined) return [...states];
+	const dialog = await ctx.ui.editor(ROUND_TITLE, `${renderRound(questions, budget)}\n\n${ANSWER_MARKER}`);
+	const reading = dialog === undefined ? undefined : answerFills(answerText(dialog), questions, budget);
+	if (reading === undefined) return [...states];
+	if (reading.tooLong.length > 0) ctx.ui.notify(answerTooLongNotice(reading.tooLong, budget), "info");
+	if (reading.fills.size === 0) return [...states];
 	return states.map((state): ElementState => {
 		if (state.standing !== "ask") return state;
-		const words = fills.get(state.element);
+		const words = reading.fills.get(state.element);
 		return words === undefined ? state : { element: state.element, standing: "filled", words, source: "answer" };
 	});
 }

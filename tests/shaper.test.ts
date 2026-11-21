@@ -276,6 +276,8 @@ const CONTEXT_ROUND = `**Round 1**
 
 Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
 
+Each answer has room for at most 26 words; a longer one is left out.
+
 ❓ **Q1** - **context**
 
 ${CONTEXT_QUESTION}
@@ -304,10 +306,15 @@ const DONE_WHEN_ASK = JSON.stringify({
 	"done-when": { question: DONE_WHEN_QUESTION, suggested: DONE_WHEN_SUGGESTION },
 });
 
-/** The round the Boss reads for SHORT_NO_CONTEXT_NO_DONE_WHEN: the done-when, numbered first of one. */
-const DONE_WHEN_ROUND = `**Round 1**
+/**
+ * The round the Boss reads when the done-when is the only open element, numbered first of one, with
+ * the words each answer has room for: the reshape cap less the prompt, the headers and any fill.
+ */
+const doneWhenRound = (budget: number): string => `**Round 1**
 
 Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
+
+Each answer has room for at most ${budget} words; a longer one is left out.
 
 ❓ **Q1** - **done-when**
 
@@ -316,6 +323,40 @@ ${DONE_WHEN_QUESTION}
 ➡️ ${DONE_WHEN_SUGGESTION}
 
 Your answer:`;
+
+/**
+ * The Boss's answer to the done-when question in his own words: 16 words, past the 13 the shape has
+ * room for once the prompt's 13, the four headers' 8 and the session's 5-word context are counted
+ * against the 39-word cap.
+ */
+const OVER_LONG_ANSWER = "the entire queue test suite passes once the rename has landed and the branch is merged";
+
+/** The notice when that answer has no room: the Boss's words are left out rather than silently dropped. */
+const OVER_LONG_ANSWER_NOTICE =
+	"Shaper: the answer to done-when runs past the 13 words the shape has room for, so it was left out.";
+
+/**
+ * The notice after a round whose only answer was left out: the context the notes filled stands, and
+ * the done-when stays open so the prompt goes on as typed rather than being reshaped.
+ */
+const OVER_LONG_GAP_NOTICE =
+	"Shaper: thin prompt. goal present; context filled from the session; constraints present; done-when marked for a question";
+
+/** Two answers in the Boss's own words, each past the 9 words a round of two questions leaves. */
+const OVER_LONG_NUMBERED_ANSWERS =
+	"Q1: the retry bug lives in the queue tests under src and the CLI reads it\nQ2: the whole queue test suite is green once the rename lands";
+
+/** The notice when both of those answers have no room: both elements are named in one notice. */
+const OVER_LONG_ANSWERS_NOTICE =
+	"Shaper: the answer to context and done-when runs past the 9 words the shape has room for, so it was left out.";
+
+/** The notice after that round: neither answered element is filled, so both stay open. */
+const OVER_LONG_ANSWERS_GAP_NOTICE =
+	"Shaper: thin prompt. goal present; context marked for a question; constraints present; done-when marked for a question";
+
+/** The notice when a round of one question is declined without another answer: the gap stays open. */
+const DONE_WHEN_QUESTION_NOTICE =
+	"Shaper: thin prompt. goal present; context present; constraints present; done-when marked for a question";
 
 /** The two questions the model writes when nothing could answer the context or the done-when. */
 const TWO_QUESTION_ASK = JSON.stringify({
@@ -327,6 +368,8 @@ const TWO_QUESTION_ASK = JSON.stringify({
 const TWO_QUESTION_ROUND = `**Round 1**
 
 Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
+
+Each answer has room for at most 9 words; a longer one is left out.
 
 ❓ **Q1** - **context**
 
@@ -348,6 +391,9 @@ Your answer:`;
 const BOSS_CONTEXT_ANSWER = "the retry bug in src/queue.ts";
 const BOSS_DONE_WHEN_ANSWER = "tests/queue.test.ts is green";
 const TWO_NUMBERED_ANSWERS = `Q1: ${BOSS_CONTEXT_ANSWER}\nQ2: ${BOSS_DONE_WHEN_ANSWER}`;
+
+/** The same two answers, both typed on one line: the Boss answers by number without pressing return. */
+const ONE_LINE_ANSWERS = `Q1: ${BOSS_CONTEXT_ANSWER} Q2: ${BOSS_DONE_WHEN_ANSWER}`;
 
 /**
  * A short prompt carrying its goal, its context and its constraints, with no way to tell the work
@@ -1441,6 +1487,38 @@ test("what the scout cannot find becomes a question, even when the workspace hol
 	});
 });
 
+test("a scout that finds nothing hands its gap to the round, and the Boss's answer fills it", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		ask: CONTEXT_ASK,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+		answer: BOSS_CONTEXT_ANSWER,
+	});
+	writeScoutAgent(workspace);
+	writeScoutProcess(workspace, SCOUT_NOT_FOUND);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.deepEqual(
+			session.rounds,
+			[{ title: ROUND_TITLE, text: CONTEXT_ROUND }],
+			"the gap the scout could not fill is put to the Boss as one numbered question",
+		);
+		assert.equal(
+			session.editorText(),
+			contextFilledShape(BOSS_CONTEXT_ANSWER),
+			"the editor holds the shape with the Boss's answer under Context",
+		);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[SCOUTING_NOTICE, "Shaper: shaped. context filled by your answer. alt+r restores your words."],
+			"the Boss is told the lookup ran, then that his answer filled the gap the scout could not",
+		);
+		assert.equal(mainRequests(workspace).length, 0, "the shape waits in the editor; nothing reached the main model");
+	});
+});
+
 test("a scout definition the Shaper cannot read leaves the gap marked for the scout, and the prompt goes on as typed", async () => {
 	const workspace = scoutWorkspace(SCOUT_CONTEXT_FILL);
 	// A definition in the place the staged one sits, with frontmatter that is not YAML.
@@ -1563,7 +1641,7 @@ test("the round asks only the element neither the session nor the scout could an
 	const { rounds } = await promptInSession(workspace, SHORT_NO_CONTEXT_NO_DONE_WHEN);
 	assert.deepEqual(
 		rounds,
-		[{ title: ROUND_TITLE, text: DONE_WHEN_ROUND }],
+		[{ title: ROUND_TITLE, text: doneWhenRound(13) }],
 		"the round asks the done-when and says nothing about the context the project's notes already filled",
 	);
 });
@@ -1594,6 +1672,57 @@ test("answering yes accepts every suggestion, and the shaped prompt comes back w
 	});
 });
 
+test("an answer in the Boss's own words that runs past the shape's room is left out with a notice, and its element stays open", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_NO_DONE_WHEN_CHECK,
+		infer: NOTES_CONTEXT_INFER,
+		ask: DONE_WHEN_ASK,
+		reshape: NO_CONTEXT_NO_DONE_WHEN_FIELDS,
+		answer: OVER_LONG_ANSWER,
+	});
+	writeNotes(workspace, NOTES_FACT);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT_NO_DONE_WHEN);
+		assert.deepEqual(
+			session.rounds,
+			[{ title: ROUND_TITLE, text: doneWhenRound(13) }],
+			"the round tells the Boss the words each answer has room for before he types",
+		);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[OVER_LONG_ANSWER_NOTICE, OVER_LONG_GAP_NOTICE],
+			"the Boss is told his answer had no room, and that its element stayed open",
+		);
+		assert.equal(session.editorText(), "", "an answer with no room never half-fills the shape");
+		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_NO_CONTEXT_NO_DONE_WHEN,
+			"the main model received the words as typed, so no over-long answer is silently dropped",
+		);
+	});
+});
+
+test("answers to both questions that run past the room are named together, and both elements stay open", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_NO_DONE_WHEN_CHECK,
+		ask: TWO_QUESTION_ASK,
+		reshape: NO_CONTEXT_NO_DONE_WHEN_FIELDS,
+		answer: OVER_LONG_NUMBERED_ANSWERS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT_NO_DONE_WHEN);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[OVER_LONG_ANSWERS_NOTICE, OVER_LONG_ANSWERS_GAP_NOTICE],
+			"the Boss hears both answers had no room, and both elements stay open",
+		);
+		assert.equal(session.editorText(), "", "answers with no room never half-fill the shape");
+	});
+});
+
 test("an answer given by question number fills that element with the Boss's words, and the reshape proceeds", async () => {
 	const workspace = makeWorkspace({
 		settings: SHAPING_ON,
@@ -1613,6 +1742,72 @@ test("an answer given by question number fills that element with the Boss's word
 			session.notices.map(({ message }) => message),
 			["Shaper: shaped. context, done-when filled by your answer. alt+r restores your words."],
 			"the Boss is told both elements carry words he supplied",
+		);
+	});
+});
+
+test("an answer that declines the suggestion keeps the Boss's words without the no", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_DONE_WHEN_ONLY_CHECK,
+		ask: DONE_WHEN_ASK,
+		reshape: NO_DONE_WHEN_FIELDS,
+		answer: `Q1: no, ${BOSS_DONE_WHEN_ANSWER}`,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_DONE_WHEN);
+		assert.equal(
+			session.editorText(),
+			doneWhenFilledShape(BOSS_DONE_WHEN_ANSWER),
+			"the shape carries the Boss's words under Done-when, not the no that declined the suggestion",
+		);
+	});
+});
+
+test("a bare no to a round of one question fills nothing, and the prompt goes on as typed", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_DONE_WHEN_ONLY_CHECK,
+		ask: DONE_WHEN_ASK,
+		reshape: NO_DONE_WHEN_FIELDS,
+		answer: "no",
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_DONE_WHEN);
+		assert.deepEqual(
+			session.rounds,
+			[{ title: ROUND_TITLE, text: doneWhenRound(20) }],
+			"the Boss read the question once before he declined it",
+		);
+		assert.equal(session.editorText(), "", "a no is not an answer, so nothing is put in the editor");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[DONE_WHEN_QUESTION_NOTICE],
+			"the Boss is told the element stayed open rather than filled with the word no",
+		);
+		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_NO_DONE_WHEN,
+			"the main model received the words as typed",
+		);
+	});
+});
+
+test("answers typed on one line each fill their own element", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_NO_DONE_WHEN_CHECK,
+		ask: TWO_QUESTION_ASK,
+		reshape: NO_CONTEXT_NO_DONE_WHEN_FIELDS,
+		answer: ONE_LINE_ANSWERS,
+	});
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT_NO_DONE_WHEN);
+		assert.equal(
+			session.editorText(),
+			bothFilledShape(BOSS_CONTEXT_ANSWER, BOSS_DONE_WHEN_ANSWER),
+			"each answer keeps its own words under its own header, and neither swallows the other",
 		);
 	});
 });
