@@ -1,35 +1,44 @@
 /**
  * pi-shaper: the Shaper lifts thin typed prompts toward a consistent high-quality shape.
  *
- * This slice is the cascade's first step, inference. With shaping on, the Shaper asks the session's
+ * This slice is the cascade's second step, the scout. With shaping on, the Shaper asks the session's
  * own model which of the four standing elements a typed prompt carries: goal, context, constraints
  * and done-when (see GLOSSARY.md). A short prompt that leaves an element missing has the absent
  * ones filled from what the session already knows (the repo, the branch, what the project's Beads
- * remember, the conversation so far and the project's own notes), and each gap the session cannot
- * fill is marked for the scout, where the answer can be looked up, or for a question, where it
- * cannot. Nothing is invented: a fill survives only when every word of it is a word the session
- * itself carries. A short prompt whose four elements are then all there is reshaped: words moved
- * under the four headers, put in the editor for the Boss to accept or edit, never sent by itself.
- * The original is kept, and one press of `alt+r` puts it back in the editor. A prompt that still has
- * a gap is reported element by element and goes on as typed.
+ * remember, the conversation so far and the project's own notes), and each gap the session can
+ * place but not fill is sent to the scout agent, which looks it up with the read tools of its own
+ * definition. What the scout finds fills the element with the scout's own words; what it cannot
+ * find is marked for a question, never guessed. The Shaper holds no lookup of its own: it asks for
+ * one, and nothing else.
+ *
+ * Nothing is invented: a fill from the session survives only when every word of it is a word the
+ * session itself carries. A short prompt whose four elements are then all there is reshaped: words
+ * moved under the four headers, put in the editor for the Boss to accept or edit, never sent by
+ * itself. The original is kept, and one press of `alt+r` puts it back in the editor. A prompt that
+ * still has a gap is reported element by element and goes on as typed.
  *
  * Shaping is opt-in under the `shaper.enabled` setting, which is off when it is absent, so the
  * Tweaker's silence stays the default (pp-csw).
  *
- * The check, the inference and the reshape all fail open: a model that cannot be reached, a reply
- * that is not the one asked for, a fill the session's words do not carry, or a reshape that changes
- * the words it was given or runs past the length cap leaves the prompt to go on as typed, and puts
- * nothing in the editor. A mode with no UI (print, JSON) has no editor for a shape to wait in, so
- * its prompt goes on unchecked.
+ * The check, the inference, the scout and the reshape all fail open: a model that cannot be
+ * reached, a reply that is not the one asked for, a fill the session's words do not carry, a scout
+ * definition that cannot be read or a scout that cannot run, or a reshape that changes the words it
+ * was given or runs past the length cap leaves the prompt to go on as typed, and puts nothing in the
+ * editor. A mode with no UI (print, JSON) has no editor for a shape to wait in, so its prompt goes
+ * on unchecked.
  *
  * The seam is the real pi session (see tests/shaper.test.ts): this file wires pi's `input` event
  * to the Shaper, the check, the inference and the reshape speak to the session's model through
- * `ctx.modelRegistry.streamSimple()` so pi's own credentials and model choice are used, and the
- * report and the shaped text reach the Boss through `ctx.ui.notify()` and `ctx.ui.setEditorText()`,
- * the same notices and editor the tests read. The one-key revert is pi's shortcut, registered as
- * `alt+r`, and the tests press it through pi's shortcut registry.
+ * `ctx.modelRegistry.streamSimple()` so pi's own credentials and model choice are used, the scout
+ * runs as a pi process of its own so the Shaper never holds a lookup tool, and the report and the
+ * shaped text reach the Boss through `ctx.ui.notify()` and `ctx.ui.setEditorText()`, the same
+ * notices and editor the tests read. The one-key revert is pi's shortcut, registered as `alt+r`,
+ * and the tests press it through pi's shortcut registry.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
 
 /** What pi's settings.json holds under the shaper key. */
@@ -60,17 +69,22 @@ type StandingElement = (typeof STANDING_ELEMENTS)[number];
 /** What the check's model reported about one standing element. */
 type ElementReport = { element: StandingElement; present: boolean };
 
-/** What the inference decided about one absent element: fill it, look it up, or ask about it. */
-type Inference = { filled: string } | "scout" | "ask";
+/** What the inference decided about one absent element: fill it from the session, look it up, or ask about it. */
+type Inference = { filled: string } | { scout: string } | "ask";
 
 /**
- * Where one standing element stands after the check and the inference: carried by the prompt,
- * filled from the session, or a gap with the mark the inference gave it. Without a mark the element
- * is `missing`, which is every gap in a prompt the Shaper does not shape in this slice.
+ * Where one standing element stands after the check, the inference and the scout: carried by the
+ * prompt, filled with words from the session or the scout, a gap with the place its answer lives,
+ * or a gap to put to the Boss. Without a mark the element is `missing`, which is every gap in a
+ * prompt the Shaper does not shape in this slice.
  */
 type ElementState =
-	| { element: StandingElement; standing: "present" | "missing" | "scout" | "ask" }
-	| { element: StandingElement; standing: "filled"; words: string };
+	| { element: StandingElement; standing: "present" | "missing" | "ask" }
+	| { element: StandingElement; standing: "scout"; place: string }
+	| { element: StandingElement; standing: "filled"; words: string; source: FillSource };
+
+/** Who supplied the words an element is filled with: the session's own sources, or the scout. */
+type FillSource = "session" | "scout";
 
 /**
  * The first line of the check's instructions, so a provider that stands in for the session's model
@@ -418,7 +432,7 @@ function inferenceFor(
 	// question when it names no place, so an invented answer can never fill an element. An entry that
 	// carries only a question reaches the same mark.
 	if (typeof filled === "string" && isSessionWords(filled, carried)) return { filled: filled.trim() };
-	if (typeof scout === "string" && scout.trim() !== "") return "scout";
+	if (typeof scout === "string" && scout.trim() !== "") return { scout: scout.trim() };
 	return "ask";
 }
 
@@ -443,6 +457,156 @@ async function inferAbsent(
 }
 
 /**
+ * The scout agent's own definition: the instructions it runs under, and the model and tools its
+ * frontmatter names. The Shaper reads it from the user's agent folder, where pi keeps its agents,
+ * and starts the lookup with it, so the Shaper holds no read tool and never looks a gap up itself.
+ */
+type ScoutDefinition = { instructions: string; model?: string; tools: string };
+
+/** The agent a placeable gap goes to: the name its file carries in the agent folder pi reads. */
+const SCOUT_AGENT = "scout";
+
+/** The tools a scout runs with when its definition names none, so a lookup can never change a file. */
+const SCOUT_READ_TOOLS = "read, bash, grep, find, ls";
+
+/** How long one scout lookup may run before the gap goes without it. */
+const SCOUT_TIMEOUT_MS = 30_000;
+
+/** The answer the scout gives when the place it was sent to does not hold the gap's context. */
+const SCOUT_NOT_FOUND = "NOT FOUND";
+
+/** The tools an agent definition names, either as the comma-separated list pi takes or as a YAML array. */
+function scoutTools(tools: unknown): string[] {
+	const named = typeof tools === "string" ? tools.split(",") : Array.isArray(tools) ? tools : [];
+	return named.flatMap((tool) => (typeof tool === "string" && tool.trim() !== "" ? [tool.trim()] : []));
+}
+
+/**
+ * The scout agent's definition, or `undefined` when the user has no scout agent to ask. The
+ * definition lives where pi looks for agents, so the scout is the one that says how a gap is looked
+ * up: the Shaper never carries a copy of it.
+ */
+function scoutDefinition(): ScoutDefinition | undefined {
+	try {
+		const definition = readFileSync(join(getAgentDir(), "agents", `${SCOUT_AGENT}.md`), "utf8");
+		const { frontmatter, body } = parseFrontmatter<{ model?: unknown; tools?: unknown }>(definition);
+		const instructions = body.trim();
+		if (instructions === "") return undefined;
+		const model =
+			typeof frontmatter.model === "string" && frontmatter.model.trim() !== ""
+				? frontmatter.model.trim()
+				: undefined;
+		const tools = scoutTools(frontmatter.tools);
+		return { instructions, model, tools: tools.length === 0 ? SCOUT_READ_TOOLS : tools.join(", ") };
+	} catch {
+		// A missing or malformed definition is no scout to ask, and never a reason the prompt cannot go on.
+		return undefined;
+	}
+}
+
+/** One gap the scout is asked about: the element, and the place the session said the answer lives. */
+type ScoutGap = { element: StandingElement; place: string };
+
+/** What one question to the scout came back with: the context it found, none there, or no scout to ask. */
+type ScoutLookup = { found: string } | "not-found" | "unavailable";
+
+/** The question the Shaper puts to the scout: the gap, the place to look, and the prompt it serves. */
+function scoutTask(prompt: string, gap: ScoutGap): string {
+	return `Look up one gap in a prompt the Boss is typing, so the gap can be filled with what the sources say instead of a guess.
+
+The gap: ${gap.element}. Where the session says it can be looked up: ${gap.place}.
+
+Look it up in one or two reads and answer at once. Give the context itself, copied as the sources state it, in one short paragraph. Answer exactly ${SCOUT_NOT_FOUND} when the place does not hold it.
+
+The prompt as typed:
+${prompt}`;
+}
+
+/**
+ * The answer one scout run left: the first paragraph of its last message, or `undefined` when the
+ * scout said nothing or said the place does not hold the gap. The first paragraph is the scout's
+ * short answer, which its own instructions put first; its evidence and any findings path follow it.
+ */
+function scoutAnswer(output: string): string | undefined {
+	let reply = "";
+	for (const line of output.split("\n")) {
+		if (line.trim() === "") continue;
+		let event: unknown;
+		try {
+			event = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (typeof event !== "object" || event === null) continue;
+		const { type, message } = event as { type?: unknown; message?: unknown };
+		if (type !== "message_end" || typeof message !== "object" || message === null) continue;
+		const { role, content } = message as { role?: unknown; content?: unknown };
+		if (role !== "assistant") continue;
+		reply = messageText(content);
+	}
+	const answer = reply.trim().split(/\n\s*\n/)[0]?.trim() ?? "";
+	if (answer === "" || answer.toUpperCase().startsWith(SCOUT_NOT_FOUND)) return undefined;
+	return answer;
+}
+
+/**
+ * Ask the scout agent one question and read what it found. The lookup is a pi process of its own,
+ * started with the scout's own definition, so the Shaper holds no read tool and never looks the gap
+ * up itself. A missing scout agent, a failed, slow or empty run, and an answer that says the place
+ * does not hold the gap all leave the element without a fill.
+ */
+async function askScout(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	prompt: string,
+	gap: ScoutGap,
+): Promise<ScoutLookup> {
+	const scout = scoutDefinition();
+	if (scout === undefined) return "unavailable";
+	const args = ["--mode", "json", "-p", "--no-session"];
+	if (scout.model !== undefined) args.push("--model", scout.model);
+	args.push("--tools", scout.tools, "--append-system-prompt", scout.instructions, scoutTask(prompt, gap));
+	try {
+		const { code, stdout } = await pi.exec("pi", args, { cwd: ctx.cwd, timeout: SCOUT_TIMEOUT_MS });
+		const answer = code === 0 ? scoutAnswer(stdout) : undefined;
+		return answer === undefined ? "not-found" : { found: answer };
+	} catch {
+		return "not-found";
+	}
+}
+
+/** The places the scout is asked about: every gap the session could place but not fill. */
+function placeableGaps(states: readonly ElementState[]): ScoutGap[] {
+	return states.flatMap((state) => (state.standing === "scout" ? [{ element: state.element, place: state.place }] : []));
+}
+
+/**
+ * The cascade's second step: every gap the session could place but not fill goes to the scout. The
+ * lookups run together, each cut off by the scout's own timeout, so a prompt with several gaps
+ * waits for the slowest one rather than for all of them one after another. What the scout finds
+ * fills its element; a place that does not hold the answer becomes a question; a scout that cannot
+ * be asked at all leaves the gap marked for the scout, so the Boss still knows where it stands.
+ */
+async function placeGaps(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	prompt: string,
+	states: readonly ElementState[],
+): Promise<ElementState[]> {
+	const gaps = placeableGaps(states);
+	if (gaps.length === 0) return [...states];
+	const lookups = await Promise.all(gaps.map((gap) => askScout(pi, ctx, prompt, gap)));
+	const answers = new Map(gaps.map((gap, index) => [gap.element, lookups[index]] as const));
+	return states.map((state): ElementState => {
+		if (state.standing !== "scout") return state;
+		const lookup = answers.get(state.element);
+		if (lookup === undefined || lookup === "unavailable") return state;
+		if (lookup === "not-found") return { element: state.element, standing: "ask" };
+		return { element: state.element, standing: "filled", words: lookup.found, source: "scout" };
+	});
+}
+
+/**
  * The state of every standing element after the check and the inference: present in the prompt,
  * filled from the session, or a gap carrying the inference's mark.
  */
@@ -454,40 +618,45 @@ function statesOf(
 		if (present) return { element, standing: "present" };
 		const decision = decisions?.get(element);
 		if (decision === undefined) return { element, standing: "missing" };
-		return decision === "scout" || decision === "ask"
-			? { element, standing: decision }
-			: { element, standing: "filled", words: decision.filled };
+		if (decision === "ask") return { element, standing: "ask" };
+		if ("filled" in decision) return { element, standing: "filled", words: decision.filled, source: "session" };
+		return { element, standing: "scout", place: decision.scout };
 	});
 }
 
-/** Whether an element is still a gap: neither carried by the prompt nor filled from the session. */
+/** Whether an element is still a gap: neither carried by the prompt nor filled. */
 const isGap = (state: ElementState): boolean => state.standing !== "present" && state.standing !== "filled";
 
-/** One standing element the session fills, and the session's own words it fills the element with. */
-type Fill = { element: StandingElement; words: string };
+/** One standing element a lookup fills, the words it fills the element with, and who supplied them. */
+type Fill = { element: StandingElement; words: string; source: FillSource };
 
 /** The fills a prompt's state carries, ready for the reshape and the notice. */
 function fillsOf(states: readonly ElementState[]): Fill[] {
 	return states.flatMap((state) =>
-		state.standing === "filled" ? [{ element: state.element, words: state.words }] : [],
+		state.standing === "filled" ? [{ element: state.element, words: state.words, source: state.source }] : [],
 	);
 }
 
-/** The phrase each standing element's place in the cascade gets in the notice. */
-const STANDING_PHRASES: Record<ElementState["standing"], string> = {
+/** The phrase each unfilled standing element's place in the cascade gets in the notice. */
+const STANDING_PHRASES: Record<Exclude<ElementState["standing"], "filled">, string> = {
 	present: "present",
-	filled: "filled from the session",
 	missing: "missing",
 	scout: "marked for the scout",
 	ask: "marked for a question",
 };
+
+/** The phrase one standing element's place in the cascade gets in the notice, fills naming their source. */
+function standingPhrase(state: ElementState): string {
+	if (state.standing !== "filled") return STANDING_PHRASES[state.standing];
+	return state.source === "scout" ? "filled by the scout" : "filled from the session";
+}
 
 /**
  * The notice a thin prompt earns: every element's place in the cascade, in the order the Boss reads
  * them. `missing` is a gap no inference was made for, which is every gap in a long prompt.
  */
 function thinPromptNotice(states: readonly ElementState[]): string {
-	const elements = states.map(({ element, standing }) => `${element} ${STANDING_PHRASES[standing]}`).join("; ");
+	const elements = states.map((state) => `${state.element} ${standingPhrase(state)}`).join("; ");
 	return `Shaper: thin prompt. ${elements}`;
 }
 
@@ -546,8 +715,8 @@ const reshapeInstructions = (prompt: string, plan: ShapePlan): string => {
 		plan.filled.length === 0
 			? ""
 			: `
-The session already fills ${plan.filled.join(", ")} with its own words. Answer only ${plan.toPlace.join(", ")}:
-those elements are not yours, and the shape keeps the session's words for them.
+These elements are already filled with words that are not yours to change: ${plan.filled.join(", ")}.
+Answer only ${plan.toPlace.join(", ")}: the shape keeps the filled words as they stand.
 `;
 	return `${RESHAPE_MARK}
 Reorganize one short typed prompt under its four standing elements, using the prompt's own words.
@@ -674,11 +843,17 @@ async function reshape(
 /** The key that puts the Boss's original words back in the editor after a reshape. */
 const REVERT_KEY = "alt+r";
 
-/** The notice after a reshape, naming the elements the session filled when it filled any. */
+/** The notice after a reshape, naming the elements each source filled when any did. */
 function shapeNotice(fills: readonly Fill[]): string {
-	const fromSession =
-		fills.length === 0 ? "" : ` ${fills.map(({ element }) => element).join(", ")} filled from the session.`;
-	return `Shaper: shaped.${fromSession} ${REVERT_KEY} restores your words.`;
+	const elements = (source: FillSource): string =>
+		fills.filter((fill) => fill.source === source).map(({ element }) => element).join(", ");
+	const filled = [
+		elements("session") === "" ? "" : `${elements("session")} filled from the session`,
+		elements("scout") === "" ? "" : `${elements("scout")} filled by the scout`,
+	]
+		.filter(Boolean)
+		.join("; ");
+	return `Shaper: shaped.${filled === "" ? "" : ` ${filled}.`} ${REVERT_KEY} restores your words.`;
 }
 
 /** A shaped prompt held for the Boss: the words as typed, and the reshape shown in the editor. */
@@ -734,11 +909,11 @@ export default function shaper(pi: ExtensionAPI): void {
 			if (absent.length > 0) ctx.ui.notify(thinPromptNotice(statesOf(report)), "info");
 			return { action: "continue" };
 		}
-		// The cascade's first step: the session fills what it knows, and every gap it cannot fill is
-		// marked for the scout or for a question. The inference reads the repo, the branch, the project's
-		// Beads, the conversation and the project's notes, not just the prompt.
+		// The cascade's first step: the session fills what it knows, and the second sends every gap it can
+		// place but not fill to the scout. What comes back is a fill, or a question for what no lookup could
+		// answer; the Shaper itself never looks anything up.
 		const decisions = absent.length === 0 ? undefined : await inferAbsent(pi, ctx, event.text, absent);
-		const states = statesOf(report, decisions);
+		const states = await placeGaps(pi, ctx, event.text, statesOf(report, decisions));
 		// A prompt that still has a gap is reported element by element and goes on as typed.
 		if (states.some(isGap)) {
 			ctx.ui.notify(thinPromptNotice(states), "info");

@@ -10,7 +10,17 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { after, test } from "node:test";
@@ -20,6 +30,7 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const extension = join(root, "extensions", "shaper.ts");
 const testProvider = join(root, "tests", "fixtures", "shaper-test-provider.ts");
+const scoutPi = join(root, "tests", "fixtures", "scout-pi.mjs");
 
 /**
  * The thin prompt the tests type: a goal and nothing else, so context, constraints and done-when
@@ -158,6 +169,26 @@ const SESSION_CONTEXT_INFER = JSON.stringify({ context: { filled: SESSION_CONTEX
  */
 const SCOUT_CONTEXT_INFER = JSON.stringify({ context: { scout: "the queue tests in src/queue.test.ts" } });
 
+/** The place the inference sends the scout, as the model named it. */
+const SCOUT_PLACE = "the queue tests in src/queue.test.ts";
+
+/** The scout agent's own definition, staged in the workspace's agent folder as `agents/scout.md`. */
+const SCOUT_MODEL = "chain/scout";
+const SCOUT_TOOLS = "read, bash, grep, find, ls, write";
+const SCOUT_BODY = "You are a Scout. Look the answer up in the repository and never guess.";
+
+/**
+ * The context the scout finds for SHORT_NO_CONTEXT: words that are not in the session's own
+ * sources, because the scout read them from the repository.
+ */
+const SCOUT_CONTEXT_FILL = "the retry queue tests live in src/queue.test.ts";
+
+/** What the scout answers when the place it was sent to does not hold the gap's answer. */
+const SCOUT_NOT_FOUND = "NOT FOUND";
+
+/** The notice after a shape whose context the scout filled. */
+const SCOUT_FILLED_NOTICE = "Shaper: shaped. context filled by the scout. alt+r restores your words.";
+
 /**
  * What the model answers when it makes up words the session never carried: no session fact says
  * src/payments.ts, so the Shaper may not fill the context with it.
@@ -256,20 +287,29 @@ const SHAPING_ON = { shaper: { enabled: true } };
  * check's all-present default, an inference that answers nothing, and a reshape reply the Shaper
  * must refuse.
  */
-type WorkspaceOptions = { settings?: Record<string, unknown>; check?: string; infer?: string; reshape?: string };
+type WorkspaceOptions = {
+	settings?: Record<string, unknown>;
+	check?: string;
+	infer?: string;
+	reshape?: string;
+};
 
 /**
  * One temporary Mac: a HOME, an agent folder pi reads its settings from, the test provider's log,
- * and, when a test names them, the answers the session's model gives the Shaper's calls.
+ * a PATH of its own for the scout's pi, and, when a test names them, the answers the session's
+ * model and the scout give the Shaper's calls.
  */
 type Workspace = {
 	dir: string;
 	home: string;
 	agentDir: string;
 	log: string;
+	bin: string;
+	scoutLog: string;
 	check?: string;
 	infer?: string;
 	reshape?: string;
+	scout?: string;
 };
 
 /** Every workspace this file made, removed once its tests are done. */
@@ -285,13 +325,27 @@ function makeWorkspace(options: WorkspaceOptions = {}): Workspace {
 	const home = join(dir, "home");
 	const agentDir = join(dir, "pi-agent");
 	const log = join(dir, "requests.jsonl");
+	const bin = join(dir, "bin");
+	const scoutLog = join(dir, "scout.jsonl");
 	mkdirSync(home, { recursive: true });
 	mkdirSync(agentDir, { recursive: true });
-	// The log exists, empty, from the start: a test reads it before any request is written, so a
-	// missing file stays a fault instead of answering the same as no request.
+	mkdirSync(bin, { recursive: true });
+	// The logs exist, empty, from the start: a test reads one before any call is written, so a
+	// missing file stays a fault instead of answering the same as no call.
 	writeFileSync(log, "");
+	writeFileSync(scoutLog, "");
 	if (options.settings !== undefined) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
-	const workspace = { dir, home, agentDir, log, check: options.check, infer: options.infer, reshape: options.reshape };
+	const workspace = {
+		dir,
+		home,
+		agentDir,
+		log,
+		bin,
+		scoutLog,
+		check: options.check,
+		infer: options.infer,
+		reshape: options.reshape,
+	};
 	workspaces.push(workspace);
 	return workspace;
 }
@@ -323,9 +377,36 @@ function writeBead(workspace: Workspace, key: string, fact: string): void {
 }
 
 /**
- * The environment a pi process runs in: a temporary HOME and agent folder, the provider's log, and,
- * when a test names them, the answers the session's model gives the Shaper's calls. A test that
- * names no answer leaves the variables out, so the provider's own defaults answer.
+ * Stage the scout agent in the workspace's agent folder, as the Boss's own scout sits in
+ * `~/.pi/agent/agents`: the model and the tools it runs with, and the instructions it follows. An
+ * empty tools list leaves the tools line out, as an incomplete definition would.
+ */
+function writeScoutAgent(workspace: Workspace, tools: string = SCOUT_TOOLS): void {
+	const agents = join(workspace.agentDir, "agents");
+	mkdirSync(agents, { recursive: true });
+	const toolsLine = tools === "" ? "" : `tools: ${tools}\n`;
+	writeFileSync(
+		join(agents, "scout.md"),
+		`---\nname: scout\ndescription: Looks one question up.\nmodel: ${SCOUT_MODEL}\n${toolsLine}---\n\n${SCOUT_BODY}\n`,
+	);
+}
+
+/**
+ * Put the scout's pi in the workspace's PATH, answering with the given reply. It stands in for the
+ * installed pi the Shaper starts with the scout's definition, and records how it was called.
+ */
+function writeScoutProcess(workspace: Workspace, reply: string): void {
+	const pi = join(workspace.bin, "pi");
+	copyFileSync(scoutPi, pi);
+	chmodSync(pi, 0o755);
+	workspace.scout = reply;
+}
+
+/**
+ * The environment a pi process runs in: a temporary HOME and agent folder, the provider's log, the
+ * scout's log, and, when a test names them, the answers the session's model and the scout give the
+ * Shaper's calls. A test that names no answer leaves the variables out, so the provider's and the
+ * scout's own defaults answer.
  */
 const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	...process.env,
@@ -334,10 +415,15 @@ const piEnv = (workspace: Workspace): Record<string, string | undefined> => ({
 	PI_SKIP_VERSION_CHECK: "1",
 	PI_OFFLINE: "1",
 	PI_TELEMETRY: "0",
+	// The workspace's own bin comes first, so a test that puts the scout's pi there shadows the
+	// installed one for every process the session starts.
+	PATH: [workspace.bin, process.env.PATH].filter(Boolean).join(delimiter),
 	SHAPER_TEST_LOG: workspace.log,
+	SHAPER_TEST_SCOUT_LOG: workspace.scoutLog,
 	...(workspace.check === undefined ? {} : { SHAPER_TEST_CHECK_REPORT: workspace.check }),
 	...(workspace.infer === undefined ? {} : { SHAPER_TEST_INFER_REPORT: workspace.infer }),
 	...(workspace.reshape === undefined ? {} : { SHAPER_TEST_RESHAPE_REPORT: workspace.reshape }),
+	...(workspace.scout === undefined ? {} : { SHAPER_TEST_SCOUT_REPLY: workspace.scout }),
 });
 
 /**
@@ -402,9 +488,15 @@ const MAIN_MODEL = {
 	maxTokens: 4096,
 };
 
+/**
+ * The PATH the test process started with, before any test gives a workspace its own bin folder. The
+ * installed pi is found there, so a workspace's stand-in pi can never answer for the SDK's package.
+ */
+const startupPath = process.env.PATH ?? "";
+
 /** The installed pi package, found from the `pi` binary on PATH, so the tests use the same pi as the CLI. */
 function piPackageRoot(): string {
-	const bin = (process.env.PATH ?? "")
+	const bin = startupPath
 		.split(delimiter)
 		.map((directory) => join(directory, "pi"))
 		.find((path) => existsSync(path));
@@ -463,6 +555,23 @@ function inferRequests(workspace: Workspace): Request[] {
 /** Every request the Shaper sent the session's model to reshape a prompt. */
 function reshapeRequests(workspace: Workspace): Request[] {
 	return requests(workspace).filter(({ kind }) => kind === "reshape");
+}
+
+/** One call the Shaper made to the scout agent, as the scout's own process recorded it. */
+type ScoutCall = { cwd: string; args: string[] };
+
+/** Every call the Shaper made to the scout agent, in order. */
+function scoutCalls(workspace: Workspace): ScoutCall[] {
+	return readFileSync(workspace.scoutLog, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as ScoutCall);
+}
+
+/** The value one flag of a call carries, or undefined when the call has no such flag. */
+function flagValue(call: ScoutCall, flag: string): string | undefined {
+	const index = call.args.indexOf(flag);
+	return index === -1 ? undefined : call.args[index + 1];
 }
 
 /** Every request the session's own model answered for the prompt itself, not for the Shaper's calls. */
@@ -996,20 +1105,98 @@ test("an inference made of a piece of a word the session said is refused, and th
 	});
 });
 
-test("a gap the session cannot fill is marked for the scout, and the prompt goes on as typed", async () => {
+test("a placeable gap is looked up by the scout agent with its own definition, tools and the place to look", async () => {
 	const workspace = makeWorkspace({
 		settings: SHAPING_ON,
 		check: NO_CONTEXT_CHECK,
 		infer: SCOUT_CONTEXT_INFER,
 		reshape: NO_CONTEXT_SHAPE_FIELDS,
 	});
+	writeScoutAgent(workspace);
+	writeScoutProcess(workspace, SCOUT_CONTEXT_FILL);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		const [call, ...extra] = scoutCalls(workspace);
+		assert.equal(extra.length, 0, "the Shaper asked the scout once for the one gap");
+		assert.equal(call.cwd, realpathSync(workspace.dir), "the scout looked in the folder the session runs in");
+		assert.equal(flagValue(call, "--model"), SCOUT_MODEL, "the scout ran on the model its own definition names");
+		assert.equal(flagValue(call, "--tools"), SCOUT_TOOLS, "the scout ran with the tools its own definition names");
+		assert.equal(
+			flagValue(call, "--append-system-prompt"),
+			SCOUT_BODY,
+			"the scout ran under its own instructions, not the Shaper's",
+		);
+		const task = call.args.at(-1) ?? "";
+		assert.ok(task.includes(SCOUT_PLACE), "the scout was told the place the session said the answer lives");
+		assert.ok(task.includes(SHORT_NO_CONTEXT), "the scout read the prompt as the Boss typed it");
+	});
+});
+
+test("a scout definition that names no tools is asked with the read tools only, so a lookup can never change a file", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	writeScoutAgent(workspace, "");
+	writeScoutProcess(workspace, SCOUT_CONTEXT_FILL);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		const [call] = scoutCalls(workspace);
+		assert.equal(
+			flagValue(call, "--tools"),
+			"read, bash, grep, find, ls",
+			"a scout that names no tools runs with the read tools only, never one that writes",
+		);
+	});
+});
+
+test("the context the scout finds fills its element, and the shaped prompt says the scout supplied it", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	writeScoutAgent(workspace);
+	writeScoutProcess(workspace, SCOUT_CONTEXT_FILL);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(
+			session.editorText(),
+			contextFilledShape(SCOUT_CONTEXT_FILL),
+			"the editor holds the prompt under the four headers, with what the scout found under Context",
+		);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			[SCOUT_FILLED_NOTICE],
+			"the Boss is told the shape carries context the scout looked up",
+		);
+		assert.equal(mainRequests(workspace).length, 0, "the shape waits in the editor; nothing reached the main model");
+	});
+});
+
+test("what the scout cannot find becomes a question, even when the workspace holds the answer", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	writeScoutAgent(workspace);
+	writeScoutProcess(workspace, SCOUT_NOT_FOUND);
+	// The answer is at the exact place the session named, and the Shaper must not go looking for it:
+	// only the scout may, and it found none.
+	mkdirSync(join(workspace.dir, "src"), { recursive: true });
+	writeFileSync(join(workspace.dir, "src", "queue.test.ts"), "// the retry queue tests live here\n");
 	await withSession(workspace, async (session) => {
 		await session.prompt(SHORT_NO_CONTEXT);
 		assert.equal(session.editorText(), "", "nothing is put in the editor while a gap remains");
 		assert.deepEqual(
 			session.notices.map(({ message }) => message),
-			["Shaper: thin prompt. goal present; context marked for the scout; constraints present; done-when present"],
-			"the Boss is told the context is to be looked up, not invented or reshaped",
+			[CONTEXT_QUESTION_NOTICE],
+			"the gap the scout could not fill is a question for the Boss, not a guess",
 		);
 		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
 		assert.equal(
@@ -1017,6 +1204,55 @@ test("a gap the session cannot fill is marked for the scout, and the prompt goes
 			SHORT_NO_CONTEXT,
 			"the main model received the words the Boss typed",
 		);
+	});
+});
+
+test("a scout definition the Shaper cannot read leaves the gap marked for the scout, and the prompt goes on as typed", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	const agents = join(workspace.agentDir, "agents");
+	mkdirSync(agents, { recursive: true });
+	writeFileSync(join(agents, "scout.md"), "---\nmodel: [unclosed\n---\n\nYou are a Scout.\n");
+	writeScoutProcess(workspace, SCOUT_CONTEXT_FILL);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			["Shaper: thin prompt. goal present; context marked for the scout; constraints present; done-when present"],
+			"a definition the Shaper cannot read leaves the gap where the Boss can see it",
+		);
+		assert.deepEqual(scoutCalls(workspace), [], "no scout was started from a definition the Shaper could not read");
+		assert.equal(
+			mainRequests(workspace).at(-1)?.messages.at(-1),
+			SHORT_NO_CONTEXT,
+			"the main model received the words the Boss typed, so an unreadable scout cannot hold the prompt back",
+		);
+	});
+});
+
+test("with no scout agent to ask, a placeable gap stays marked for the scout and the prompt goes on as typed", async () => {
+	const workspace = makeWorkspace({
+		settings: SHAPING_ON,
+		check: NO_CONTEXT_CHECK,
+		infer: SCOUT_CONTEXT_INFER,
+		reshape: NO_CONTEXT_SHAPE_FIELDS,
+	});
+	// A pi that answers if it runs at all: the log stays empty only if the Shaper never starts a scout.
+	writeScoutProcess(workspace, SCOUT_CONTEXT_FILL);
+	await withSession(workspace, async (session) => {
+		await session.prompt(SHORT_NO_CONTEXT);
+		assert.equal(session.editorText(), "", "nothing is put in the editor while a gap remains");
+		assert.deepEqual(
+			session.notices.map(({ message }) => message),
+			["Shaper: thin prompt. goal present; context marked for the scout; constraints present; done-when present"],
+			"the Boss is told the context is to be looked up, and no scout was there to look",
+		);
+		assert.deepEqual(scoutCalls(workspace), [], "no scout was started without a scout agent to run");
+		assert.equal(reshapeRequests(workspace).length, 0, "the Shaper did not reshape a prompt that still has a gap");
 	});
 });
 
