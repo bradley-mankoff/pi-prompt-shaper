@@ -268,23 +268,40 @@ const CONTEXT_ASK = JSON.stringify({ context: { question: CONTEXT_QUESTION, sugg
 const ROUND_TITLE = "Shaper: one question round";
 
 /**
+ * The round the Boss reads, as pi's dialog shows it: the grilling skill's header, each question
+ * numbered with the answer the Shaper suggests under it, and the line the Boss answers after. A
+ * test gives the room and the questions, so each expected round is still its own literal.
+ */
+const roundText = (
+	budget: number,
+	asked: readonly { element: string; question: string; suggested: string }[],
+): string => `**Round 1**
+
+Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
+
+Each answer has room for at most ${budget} words; a longer one is left out.
+
+${asked
+	.map(
+		({ element, question, suggested }, index) =>
+			`❓ **Q${index + 1}** - **${element}**
+
+${question}
+
+➡️ ${suggested}`,
+	)
+	.join("\n\n---\n\n")}
+
+Your answer:`;
+
+/**
  * The round the Boss reads for SHORT_NO_CONTEXT when nothing could answer its context: the grilling
  * skill's format, one numbered question with the answer the Shaper suggests, then the line the Boss
  * answers after.
  */
-const CONTEXT_ROUND = `**Round 1**
-
-Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
-
-Each answer has room for at most 26 words; a longer one is left out.
-
-❓ **Q1** - **context**
-
-${CONTEXT_QUESTION}
-
-➡️ ${CONTEXT_SUGGESTION}
-
-Your answer:`;
+const CONTEXT_ROUND = roundText(26, [
+	{ element: "context", question: CONTEXT_QUESTION, suggested: CONTEXT_SUGGESTION },
+]);
 
 /**
  * A short prompt carrying its goal and its constraints, with neither a context that aims the work
@@ -298,7 +315,8 @@ const NO_CONTEXT_NO_DONE_WHEN_CHECK = '{"goal":true,"context":false,"constraints
 
 /**
  * The question the session's model writes for the one element nothing could answer here, the
- * done-when, and the answer it suggests. It is two words, inside the ten the cap leaves.
+ * done-when, and the answer it suggests. It is two words, well inside the 9 a round of two
+ * questions leaves and the 13 a round of one leaves once the notes' context fill is counted.
  */
 const DONE_WHEN_QUESTION = "What tells you the rename is finished?";
 const DONE_WHEN_SUGGESTION = "tests/queue.test.ts passes";
@@ -310,19 +328,8 @@ const DONE_WHEN_ASK = JSON.stringify({
  * The round the Boss reads when the done-when is the only open element, numbered first of one, with
  * the words each answer has room for: the reshape cap less the prompt, the headers and any fill.
  */
-const doneWhenRound = (budget: number): string => `**Round 1**
-
-Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
-
-Each answer has room for at most ${budget} words; a longer one is left out.
-
-❓ **Q1** - **done-when**
-
-${DONE_WHEN_QUESTION}
-
-➡️ ${DONE_WHEN_SUGGESTION}
-
-Your answer:`;
+const doneWhenRound = (budget: number): string =>
+	roundText(budget, [{ element: "done-when", question: DONE_WHEN_QUESTION, suggested: DONE_WHEN_SUGGESTION }]);
 
 /**
  * The Boss's answer to the done-when question in his own words: 16 words, past the 13 the shape has
@@ -365,27 +372,10 @@ const TWO_QUESTION_ASK = JSON.stringify({
 });
 
 /** The round the Boss reads for SHORT_NO_CONTEXT_NO_DONE_WHEN when neither gap could be answered. */
-const TWO_QUESTION_ROUND = `**Round 1**
-
-Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
-
-Each answer has room for at most 9 words; a longer one is left out.
-
-❓ **Q1** - **context**
-
-${CONTEXT_QUESTION}
-
-➡️ ${CONTEXT_SUGGESTION}
-
----
-
-❓ **Q2** - **done-when**
-
-${DONE_WHEN_QUESTION}
-
-➡️ ${DONE_WHEN_SUGGESTION}
-
-Your answer:`;
+const TWO_QUESTION_ROUND = roundText(9, [
+	{ element: "context", question: CONTEXT_QUESTION, suggested: CONTEXT_SUGGESTION },
+	{ element: "done-when", question: DONE_WHEN_QUESTION, suggested: DONE_WHEN_SUGGESTION },
+]);
 
 /** The Boss's answers to that round, each by its number and in his own words rather than the suggestions. */
 const BOSS_CONTEXT_ANSWER = "the retry bug in src/queue.ts";
@@ -870,9 +860,9 @@ async function openSession(workspace: Workspace): Promise<OpenSession> {
 		},
 		// The round's dialog opens with the round and the answer line the Boss types after. A test
 		// that gives no answer dismisses the dialog, as the Boss does with escape.
-		editor: async (title: string, prefill?: string) => {
-			rounds.push({ title, text: prefill ?? "" });
-			return workspace.answer === undefined ? undefined : `${prefill ?? ""} ${workspace.answer}`;
+		editor: async (title: string, prefill = "") => {
+			rounds.push({ title, text: prefill });
+			return workspace.answer === undefined ? undefined : `${prefill} ${workspace.answer}`;
 		},
 	} as unknown as ExtensionUIContext;
 	const restore = applyPiEnvironment(workspace);

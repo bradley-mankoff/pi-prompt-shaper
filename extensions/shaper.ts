@@ -408,14 +408,23 @@ element's name, and exactly one of these three forms per entry:
  "constraints": {"scout": "<where the answer can be looked up>"},
  "done-when": {"ask": "<the question to put to the Boss>"}}`;
 
-/** The request the inference sends: its instructions, and the session context with the prompt as typed. */
-function inferContext(prompt: string, context: string, absent: readonly StandingElement[]): Context {
-	const text = `The prompt lacks: ${absent.join(", ")}.
+/**
+ * The user message a cascade call reads: the elements the prompt lacks, the session context, and the
+ * prompt as typed. The inference and the question round read the same facts, so they read them
+ * through the same call and differ only in the instructions above it.
+ */
+function cascadeText(prompt: string, context: string, lacking: readonly StandingElement[]): string {
+	return `The prompt lacks: ${lacking.join(", ")}.
 
 ${context}
 
 Prompt as typed:
 ${prompt}`;
+}
+
+/** The request the inference sends: its instructions, and the session context with the prompt as typed. */
+function inferContext(prompt: string, context: string, absent: readonly StandingElement[]): Context {
+	const text = cascadeText(prompt, context, absent);
 	return {
 		systemPrompt: INFER_INSTRUCTIONS,
 		messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
@@ -451,6 +460,13 @@ function inferenceFor(
 }
 
 /**
+ * What the inference decided about the absent elements, and the session reading those decisions were
+ * made against. They travel together because the question round asks with the same facts: a second
+ * read would run the same shell commands again and could see a changed repo.
+ */
+type InferenceRun = { decisions: Map<StandingElement, Inference>; session: SessionContext };
+
+/**
  * Ask the session's own model to fill the prompt's absent elements from what the session knows. One
  * call answers for all of them, and each answer is read against the session's own words, so what
  * comes back is either a fill from those words, a place to look, or a question. A model that cannot
@@ -463,7 +479,7 @@ async function inferAbsent(
 	ctx: ExtensionContext,
 	prompt: string,
 	absent: readonly StandingElement[],
-): Promise<{ decisions: Map<StandingElement, Inference>; session: SessionContext }> {
+): Promise<InferenceRun> {
 	const session = await sessionContext(pi, ctx);
 	const reply = await askModel(ctx, inferContext(prompt, session.text, absent));
 	const reported = reply === undefined ? undefined : readJsonObject(reply);
@@ -544,12 +560,13 @@ type ScoutQuestion = { prompt: string; gap: ScoutGap; budget: number };
 type ScoutLookup = { found: string } | "not-found";
 
 /**
- * The words one scout answer may carry and still leave the shape inside the reshape cap. The cap is
- * counted over the whole shaped prompt, so the prompt's own words, the four headers and any element
- * the session already filled come out first, and the rest is divided among the gaps: an answer the
- * cap has no room for would be looked up and then lost, and the Boss would never hear of it.
+ * The words one fill may carry and still leave the shape inside the reshape cap. The cap is counted
+ * over the whole shaped prompt, so the prompt's own words, the four headers and any element already
+ * filled come out first, and the rest is divided among the gaps. The scout's answer and the Boss's
+ * answer to a question are both fills, so both get one share: an answer the cap has no room for
+ * would be looked up or typed and then lost.
  */
-function scoutBudget(prompt: string, fills: readonly Fill[], gaps: number): number {
+function fillBudget(prompt: string, fills: readonly Fill[], gaps: number): number {
 	const filled = fills.reduce((words, fill) => words + wordCount(fill.words), 0);
 	const room = reshapeCap(prompt) - wordCount(prompt) - SHAPE_HEADER_WORDS - filled;
 	return Math.floor(room / gaps);
@@ -678,7 +695,7 @@ async function placeGaps(
 	if (gaps.length === 0) return [...states];
 	const scout = scoutDefinition();
 	if (scout === undefined) return [...states];
-	const budget = scoutBudget(prompt, fillsOf(states), gaps.length);
+	const budget = fillBudget(prompt, fillsOf(states), gaps.length);
 	if (budget < 1) {
 		return states.map((state): ElementState =>
 			state.standing === "scout" ? { element: state.element, standing: "ask" } : state,
@@ -797,14 +814,16 @@ type AskedQuestion = { element: StandingElement; question: string; suggested: st
 /** What the round's answer gave: the fills whose words fit, and the elements whose answers did not. */
 type AnswerReading = { fills: Map<StandingElement, string>; tooLong: StandingElement[] };
 
+/**
+ * One round of questions as it is shown and as it is read back: the questions, and the words each
+ * answer has room for. The two travel together so the room the Boss reads is the room the Shaper
+ * enforces, which a second parameter could let drift apart.
+ */
+type Round = { questions: AskedQuestion[]; budget: number };
+
 /** The request the round sends: its instructions, the session context, and the prompt as typed. */
 function askContext(prompt: string, context: string, elements: readonly StandingElement[], budget: number): Context {
-	const text = `The prompt lacks: ${elements.join(", ")}.
-
-${context}
-
-Prompt as typed:
-${prompt}`;
+	const text = cascadeText(prompt, context, elements);
 	return {
 		systemPrompt: askInstructions(elements, budget),
 		messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
@@ -835,7 +854,7 @@ function readQuestions(reply: string, elements: readonly StandingElement[]): Ask
 const ROUND_TITLE = "Shaper: one question round";
 
 /** The line the Boss answers after, at the end of the round: the round stays above it, unedited. */
-const ANSWER_MARKER = "Your answer:";
+const ANSWER_LINE = "Your answer:";
 
 /**
  * The round the Boss reads, in the grilling skill's format: the round's number, how one word answers
@@ -844,7 +863,7 @@ const ANSWER_MARKER = "Your answer:";
  * the Boss answers them. The room is stated because the reshape drops a shape past its cap, and an
  * answer longer than the room would be typed and then lost.
  */
-function renderRound(questions: readonly AskedQuestion[], budget: number): string {
+function renderRound({ questions, budget }: Round): string {
 	const head = `**Round 1**
 
 Answer yes to accept every suggestion, or answer by number, as Q1: no, ...
@@ -861,12 +880,15 @@ Each answer has room for at most ${budget} words; a longer one is left out.`;
 
 /** What the Boss left in the round's dialog after the answer line, or nothing when it is gone. */
 function answerText(dialog: string): string {
-	const marker = dialog.lastIndexOf(ANSWER_MARKER);
-	return marker === -1 ? "" : dialog.slice(marker + ANSWER_MARKER.length).trim();
+	const at = dialog.lastIndexOf(ANSWER_LINE);
+	return at === -1 ? "" : dialog.slice(at + ANSWER_LINE.length).trim();
 }
 
-/** The word that accepts a suggestion, and its usual kins, at the start of what the Boss says. */
-const ACCEPTS = /^(?:yes|y|yep|yeah|sure|ok|okay|accept)\b/i;
+/**
+ * The word the round invites, yes, at the start of what the Boss says. Nothing else is offered in
+ * the round, so nothing else is read as an accept: every other word is the Boss's own answer.
+ */
+const ACCEPTS = /^yes\b/i;
 
 /**
  * A leading no that declines the suggestion, with the comma the round's example invites or alone.
@@ -883,14 +905,14 @@ const answerWithoutDecline = (said: string): string => said.trim().replace(DECLI
  * The marker one answer starts with, as the round writes it: `Q1:`. It is looked for anywhere in the
  * answer, not only at the start of a line, because the Boss may type several answers on one line.
  */
-const ANSWER_MARKER_WITH_NUMBER = /\*{0,2}\bQ(\d+)\b\*{0,2}\s*[:.-]?\s*/gi;
+const QUESTION_NUMBER_MARK = /\*{0,2}\bQ(\d+)\b\*{0,2}\s*[:.-]?\s*/gi;
 
 /**
  * The Boss's text for each question number, read from the `Q<n>:` markers wherever they sit. The
  * text runs to the next marker, so answers typed on one line each keep their own words.
  */
 function answersByNumber(said: string): Map<number, string> {
-	const marks = [...said.matchAll(ANSWER_MARKER_WITH_NUMBER)].map((match) => ({
+	const marks = [...said.matchAll(QUESTION_NUMBER_MARK)].map((match) => ({
 		number: Number(match[1]),
 		at: match.index ?? 0,
 		opensAt: (match.index ?? 0) + match[0].length,
@@ -910,14 +932,10 @@ function answersByNumber(said: string): Map<number, string> {
  * in the Boss's own words; a word of acceptance on that line takes the suggestion instead, and a
  * leading no takes off only the decline. A round of one question may be answered in the Boss's
  * words without the number, since there is only one answer to give. An answer longer than the
- * budget the round stated is not used: the reshape would drop the whole shape and the Boss's words
+ * room the round stated is not used: the reshape would drop the whole shape and the Boss's words
  * with it, so the element stays open instead.
  */
-function answerFills(
-	answer: string,
-	questions: readonly AskedQuestion[],
-	budget: number,
-): AnswerReading | undefined {
+function answerFills(answer: string, { questions, budget }: Round): AnswerReading | undefined {
 	const said = answer.trim();
 	if (said === "") return undefined;
 	const fills = new Map<StandingElement, string>();
@@ -934,13 +952,13 @@ function answerFills(
 		} else if (questions.length === 1) {
 			take(questions[0].element, answerWithoutDecline(said));
 		}
-		return fills.size === 0 && tooLong.length === 0 ? undefined : { fills, tooLong };
+	} else {
+		questions.forEach(({ element, suggested }, index) => {
+			const saidForIt = numbered.get(index + 1);
+			if (saidForIt === undefined) return;
+			take(element, ACCEPTS.test(saidForIt) ? suggested : answerWithoutDecline(saidForIt));
+		});
 	}
-	questions.forEach(({ element, suggested }, index) => {
-		const saidForIt = numbered.get(index + 1);
-		if (saidForIt === undefined) return;
-		take(element, ACCEPTS.test(saidForIt) ? suggested : answerWithoutDecline(saidForIt));
-	});
 	return fills.size === 0 && tooLong.length === 0 ? undefined : { fills, tooLong };
 }
 
@@ -970,19 +988,20 @@ async function askRound(
 	ctx: ExtensionContext,
 	prompt: string,
 	states: readonly ElementState[],
-	session: SessionContext,
+	sessionText: string,
 ): Promise<ElementState[]> {
 	const gaps = states.filter((state) => state.standing === "ask").map(({ element }) => element);
 	if (gaps.length === 0) return [...states];
-	const budget = scoutBudget(prompt, fillsOf(states), gaps.length);
+	const budget = fillBudget(prompt, fillsOf(states), gaps.length);
 	if (budget < 1) return [...states];
-	const reply = await askModel(ctx, askContext(prompt, session.text, gaps, budget));
+	const reply = await askModel(ctx, askContext(prompt, sessionText, gaps, budget));
 	const questions = reply === undefined ? undefined : readQuestions(reply, gaps);
 	if (questions === undefined) return [...states];
-	const dialog = await ctx.ui.editor(ROUND_TITLE, `${renderRound(questions, budget)}\n\n${ANSWER_MARKER}`);
-	const reading = dialog === undefined ? undefined : answerFills(answerText(dialog), questions, budget);
+	const round: Round = { questions, budget };
+	const dialog = await ctx.ui.editor(ROUND_TITLE, `${renderRound(round)}\n\n${ANSWER_LINE}`);
+	const reading = dialog === undefined ? undefined : answerFills(answerText(dialog), round);
 	if (reading === undefined) return [...states];
-	if (reading.tooLong.length > 0) ctx.ui.notify(answerTooLongNotice(reading.tooLong, budget), "info");
+	if (reading.tooLong.length > 0) ctx.ui.notify(answerTooLongNotice(reading.tooLong, round.budget), "info");
 	if (reading.fills.size === 0) return [...states];
 	return states.map((state): ElementState => {
 		if (state.standing !== "ask") return state;
@@ -1250,7 +1269,7 @@ export default function shaper(pi: ExtensionAPI): void {
 		// The last resort: what neither the session nor the scout could answer goes to the Boss as one
 		// round of questions, and his answers fill their elements.
 		const answered =
-			inferred === undefined ? [...states] : await askRound(ctx, event.text, states, inferred.session);
+			inferred === undefined ? [...states] : await askRound(ctx, event.text, states, inferred.session.text);
 		// A prompt that still has a gap is reported element by element and goes on as typed.
 		if (answered.some(isGap)) {
 			ctx.ui.notify(thinPromptNotice(answered), "info");
