@@ -28,6 +28,13 @@
  * still has a gap, because a question went unanswered, is reported element by element and goes on
  * as typed, and no second round is asked.
  *
+ * Every shaped prompt goes to the Shaper's Correction log, one JSONL file outside every repo, in
+ * the record shape pi-prompterize's Correction log uses: the text as typed, the shaped text, every
+ * standing element with its words and source, and the outcome (shaped when it reaches the editor,
+ * kept when the Boss accepts it, reverted when he presses `alt+r`, edited when he sends changes of
+ * his own from that editor). The log is a study aid for a later pass; a log that cannot be written
+ * never stops or changes the prompt.
+ *
  * Shaping is opt-in under the `shaper.enabled` setting, which is off when it is absent, so the
  * Tweaker's silence stays the default (pp-csw).
  *
@@ -49,8 +56,11 @@
  * read. The one-key revert is pi's shortcut, registered as `alt+r`, and the tests press it through
  * pi's shortcut registry.
  */
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-ai";
@@ -1208,8 +1218,163 @@ function shapeNotice(fills: readonly Fill[]): string {
 	return `Shaper: shaped.${filled.length === 0 ? "" : ` ${filled.join("; ")}.`} ${REVERT_KEY} restores your words.`;
 }
 
-/** A shaped prompt held for the Boss: the words as typed, and the reshape shown in the editor. */
-type PendingShape = { original: string; shaped: string };
+/** The facts a Correction log's record for a shape carries, before the record has an id. */
+type ShapedPrompt = {
+	original: string;
+	shaped: string;
+	/** Every standing element as the shape carries it, for the Correction log. */
+	elements: readonly ElementState[];
+	/** When the prompt arrived, ISO 8601, and how long the Shaper's run took to shape it. */
+	time: string;
+	durationMs: number;
+};
+
+/** A shaped prompt held for the Boss: the facts the log records, and when the shape reached the editor. */
+type PendingShape = ShapedPrompt & {
+	shapedAt: number;
+	/**
+	 * The id of the Correction log record written for the shape, or undefined when the log could not
+	 * be written. It is a promise made before the shape reaches the editor, so a fate the Boss decides
+	 * the instant he sees the shape waits for the record's id instead of being dropped.
+	 */
+	recorded: Promise<string | undefined>;
+};
+
+/** How a shaped prompt ended, as the Shaper's Correction log records it. */
+type ShapeOutcome = "shaped" | ShapeFate;
+
+/** The outcomes a shape's record can be followed by: the Boss's answer to the shape he was shown. */
+type ShapeFate = "kept" | "reverted" | "edited";
+
+/**
+ * One shaped prompt as the Shaper's Correction log keeps it: the shape itself, the elements it
+ * carries, and what came of it. The record carries the same fields as the Tweaker's Fixer record,
+ * with the shaped text where the fixed text sits and the elements where the changes sit, because
+ * the Spec shares the Correction log's record shape between the two products (pp-csw).
+ */
+type ShapeRecord = RepoFacts & {
+	id: string;
+	/** The shape this record reports on, for a kept, reverted or edited shape; absent on the shape itself. */
+	shapeRecordId?: string;
+	sessionId: string;
+	model: string;
+	thinkingLevel: string;
+	original: string;
+	time: string;
+	/**
+	 * How long the Shaper's run took, on the record for the shape itself; on a record for what became
+	 * of it, how long the shape waited in the editor for the Boss's answer.
+	 */
+	durationMs: number;
+	outcome: ShapeOutcome;
+	shaped: string;
+	elements: readonly ElementState[];
+};
+
+/** The repo a prompt was typed in, so a shape can be judged against the code as it was then. */
+type RepoFacts = { repoPath: string; remote: string; commit: string };
+
+/** The Shaper's Correction log's one file, outside every repo: under XDG_DATA_HOME, or ~/.local/share. */
+function correctionLogPath(): string {
+	const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+	return join(dataHome, "pi-shaper", "corrections.jsonl");
+}
+
+/**
+ * The repo's path, its first remote's URL and its current commit, asked of git in `cwd`. A folder
+ * git does not know, or a repo with no remote, gives an empty field instead of a failure.
+ */
+async function repoFacts(pi: ExtensionAPI, cwd: string): Promise<RepoFacts> {
+	const pathAndCommit = await pi.exec("git", ["rev-parse", "--show-toplevel", "HEAD"], { cwd });
+	if (pathAndCommit.code !== 0) return { repoPath: cwd, remote: "", commit: "" };
+	// One call answers both questions, one line each: the repo's top level, then HEAD.
+	const [repoPath, commit = ""] = pathAndCommit.stdout.trim().split("\n");
+	const remoteNames = await pi.exec("git", ["remote"], { cwd });
+	const remoteName = remoteNames.stdout.split("\n").find((name) => name.trim().length > 0);
+	if (remoteName === undefined) return { repoPath, remote: "", commit };
+	const url = await pi.exec("git", ["remote", "get-url", remoteName.trim()], { cwd });
+	return { repoPath, remote: url.code === 0 ? url.stdout.trim() : "", commit };
+}
+
+/**
+ * Append one record to the Shaper's Correction log with the repo it was typed in filled in, and
+ * answer whether it was written. The log is a study aid, so a log that cannot be made or written
+ * is dropped: whatever the log does, the Boss's prompt still goes on.
+ */
+async function appendCorrectionRecord(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	record: Omit<ShapeRecord, keyof RepoFacts>,
+): Promise<boolean> {
+	try {
+		const facts = await repoFacts(pi, ctx.cwd);
+		const path = correctionLogPath();
+		await mkdir(dirname(path), { recursive: true });
+		await appendFile(path, `${JSON.stringify({ ...record, ...facts })}\n`, "utf8");
+		return true;
+	} catch {
+		// A Correction log that cannot be written never stops or changes the Boss's prompt.
+		return false;
+	}
+}
+
+/** The session facts every Shaper record carries: its id, the model and the thinking level it ran at. */
+function sessionFacts(ctx: ExtensionContext): { sessionId: string; model: string; thinkingLevel: string } {
+	return {
+		sessionId: ctx.sessionManager.getSessionId(),
+		model: ctx.model === undefined ? "" : `${ctx.model.provider}/${ctx.model.id}`,
+		thinkingLevel: ctx.thinkingLevel ?? "",
+	};
+}
+
+/**
+ * Append the record for a shape the Boss is about to see, and answer its id so the record that
+ * says what became of it can link back. The record is started when the shape reaches the editor,
+ * so a shape the Boss leaves there is still in the log.
+ */
+async function logShape(pi: ExtensionAPI, ctx: ExtensionContext, shape: ShapedPrompt): Promise<string | undefined> {
+	const id = randomUUID();
+	const written = await appendCorrectionRecord(pi, ctx, {
+		id,
+		...sessionFacts(ctx),
+		original: shape.original,
+		time: shape.time,
+		durationMs: shape.durationMs,
+		outcome: "shaped",
+		shaped: shape.shaped,
+		elements: shape.elements,
+	});
+	return written ? id : undefined;
+}
+
+/**
+ * Append what came of a shape: the Boss accepted it, pressed the revert key, or sent an edit of it
+ * from the same editor. The fate waits for the shape's own record, so a keypress the instant the
+ * shape appears still links to it. A shape whose record was never written is not reported on again,
+ * so the log is never left with a fate that links to a record it does not hold.
+ */
+async function logShapeFate(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	shape: PendingShape,
+	outcome: ShapeFate,
+	/** The words that went on in place of the shape: the Boss's edit, when there was one. */
+	sent: string = shape.shaped,
+): Promise<void> {
+	const recordId = await shape.recorded;
+	if (recordId === undefined) return;
+	await appendCorrectionRecord(pi, ctx, {
+		id: randomUUID(),
+		shapeRecordId: recordId,
+		...sessionFacts(ctx),
+		original: shape.original,
+		time: new Date().toISOString(),
+		durationMs: Date.now() - shape.shapedAt,
+		outcome,
+		shaped: sent,
+		elements: shape.elements,
+	});
+}
 
 export default function shaper(pi: ExtensionAPI): void {
 	/** The shape waiting in the editor for the Boss to accept, edit or revert, if any. */
@@ -1221,15 +1386,22 @@ export default function shaper(pi: ExtensionAPI): void {
 	// as typed. The shape is dropped, so nothing the Boss did not approve can follow the revert.
 	pi.registerShortcut(REVERT_KEY, {
 		description: "Shaper: restore the words you typed before the reshape",
-		handler: (ctx) => {
-			if (pending === undefined) return;
-			ctx.ui.setEditorText(pending.original);
-			revertedText = pending.original;
+		handler: async (ctx) => {
+			const shape = pending;
+			if (shape === undefined) return;
+			ctx.ui.setEditorText(shape.original);
+			revertedText = shape.original;
 			pending = undefined;
+			// The log learns what became of the shape after the Boss's own words are back, so a slow
+			// log never delays the revert.
+			await logShapeFate(pi, ctx, shape, "reverted");
 		},
 	});
 
 	pi.on("input", async (event, ctx) => {
+		// The run's start is the record's time: a log written after the model calls still says when the
+		// Boss typed the prompt, and how long the Shaper took to answer it.
+		const startedAt = Date.now();
 		// Only the Boss's own typing is a typed prompt (GLOSSARY.md).
 		if (event.source !== "interactive") return { action: "continue" };
 		// Slash commands are pi's, not the Shaper's.
@@ -1241,14 +1413,23 @@ export default function shaper(pi: ExtensionAPI): void {
 		if (!shapingEnabled(pi.getSettings())) return { action: "continue" };
 		// The Boss's own shaped text coming back from the editor goes on as it stands: accepting it is
 		// the send, and it is never checked or shaped a second time.
-		const acceptedShape = pending !== undefined && pending.shaped === event.text;
+		const shape = pending;
+		const acceptedShape = shape !== undefined && shape.shaped === event.text;
 		// A reverted original goes on once, exactly as the Boss typed it, without a second reshape.
 		const revertedOriginal = revertedText !== undefined && revertedText === event.text;
 		// Either way the held state has done its work; anything else is a new typed prompt, so a shape
 		// left in the editor is no longer waiting.
 		pending = undefined;
 		revertedText = undefined;
-		if (acceptedShape || revertedOriginal) return { action: "continue" };
+		if (acceptedShape || revertedOriginal) {
+			// Accepting the shape is the outcome the log is for: the Boss read the shape and kept it.
+			if (acceptedShape && shape !== undefined) await logShapeFate(pi, ctx, shape, "kept");
+			return { action: "continue" };
+		}
+		// A shape that comes back with different words was edited: a later study of the lift needs to
+		// tell the Boss's correction apart from a shape he accepted and from one he left unsent. The
+		// edited words go in the record, and the text goes on as a new typed prompt of its own.
+		if (shape !== undefined) await logShapeFate(pi, ctx, shape, "edited", event.text);
 		// A shape is text in the editor, which cannot carry the prompt's images, so a prompt with images
 		// goes on as typed rather than losing them.
 		if (event.images !== undefined && event.images.length > 0) return { action: "continue" };
@@ -1279,9 +1460,21 @@ export default function shaper(pi: ExtensionAPI): void {
 		const shaped = await reshape(ctx, event.text, fills);
 		if (shaped === undefined) return { action: "continue" };
 		// The reshape waits in the editor for the Boss; returning handled keeps it from sending itself.
-		pending = { original: event.text, shaped };
+		const shapedAt = Date.now();
+		const record: ShapedPrompt = {
+			original: event.text,
+			shaped,
+			elements: answered,
+			time: new Date(startedAt).toISOString(),
+			durationMs: shapedAt - startedAt,
+		};
+		// The record starts before the editor shows the shape, so the Boss can decide its fate at once
+		// and still have it logged; the handler waits for it so the shape is in the log when it ends.
+		const shapeToShow: PendingShape = { ...record, shapedAt, recorded: logShape(pi, ctx, record) };
+		pending = shapeToShow;
 		ctx.ui.setEditorText(shaped);
 		ctx.ui.notify(shapeNotice(fills), "info");
+		await shapeToShow.recorded;
 		return { action: "handled" };
 	});
 }
