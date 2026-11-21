@@ -464,7 +464,7 @@ async function inferAbsent(
  * reads it from the user's agent folder, where pi keeps its agents, and starts the lookup with it,
  * so the Shaper holds no read tool and never looks a gap up itself.
  */
-type ScoutDefinition = { instructions: string; model?: string; tools: string };
+type ScoutDefinition = { instructions: string; model?: string; tools: readonly string[] };
 
 /** The agent a placeable gap goes to: the name its file carries in the agent folder pi reads. */
 const SCOUT_AGENT = "scout";
@@ -477,9 +477,6 @@ const SCOUT_AGENT = "scout";
  * own definition names.
  */
 const SCOUT_READ_TOOLS: readonly string[] = ["read", "bash", "grep", "find", "ls"];
-
-/** The read tools as one comma-separated list, the form pi takes on `--tools`. */
-const SCOUT_READ_TOOL_LIST = SCOUT_READ_TOOLS.join(", ");
 
 /** How long one scout lookup may run before the gap goes without it. */
 const SCOUT_TIMEOUT_MS = 30_000;
@@ -510,11 +507,7 @@ function scoutDefinition(): ScoutDefinition | undefined {
 				: undefined;
 		const named = scoutTools(frontmatter.tools);
 		const readOnly = named.filter((tool) => SCOUT_READ_TOOLS.includes(tool));
-		return {
-			instructions,
-			model,
-			tools: readOnly.length === 0 ? SCOUT_READ_TOOL_LIST : readOnly.join(", "),
-		};
+		return { instructions, model, tools: readOnly.length === 0 ? SCOUT_READ_TOOLS : readOnly };
 	} catch {
 		// A missing or malformed definition is no scout to ask, and never a reason the prompt cannot go on.
 		return undefined;
@@ -523,6 +516,13 @@ function scoutDefinition(): ScoutDefinition | undefined {
 
 /** One gap the scout is asked about: the element, and the place the session said the answer lives. */
 type ScoutGap = { element: StandingElement; place: string };
+
+/**
+ * One question put to the scout: the prompt it serves, the gap, and the words the shape has room
+ * for its answer. The three travel together because the task quotes all three, and the budget is
+ * per answer rather than per lookup.
+ */
+type ScoutQuestion = { prompt: string; gap: ScoutGap; budget: number };
 
 /** What one question to the scout came back with: the context it found, or none there. */
 type ScoutLookup = { found: string } | "not-found";
@@ -545,7 +545,8 @@ function scoutBudget(prompt: string, fills: readonly Fill[], gaps: number): numb
  * the cap, and an answer that runs long would be lost; the scout is also told to leave no file, so a
  * lookup puts nothing on disk.
  */
-function scoutTask(prompt: string, gap: ScoutGap, budget: number): string {
+function scoutTask(question: ScoutQuestion): string {
+	const { prompt, gap, budget } = question;
 	return `Look up one gap in a prompt the Boss is typing, so the gap can be filled with what the sources say instead of a guess.
 
 The gap: ${gap.element}. Where the session says it can be looked up: ${gap.place}.
@@ -606,18 +607,22 @@ async function askScout(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	scout: ScoutDefinition,
-	prompt: string,
-	gap: ScoutGap,
-	budget: number,
+	question: ScoutQuestion,
 ): Promise<ScoutLookup> {
 	const args = ["--mode", "json", "-p", "--no-session"];
 	if (scout.model !== undefined) args.push("--model", scout.model);
-	args.push("--tools", scout.tools, "--append-system-prompt", scout.instructions, scoutTask(prompt, gap, budget));
+	args.push(
+		"--tools",
+		scout.tools.join(", "),
+		"--append-system-prompt",
+		scout.instructions,
+		scoutTask(question),
+	);
 	try {
 		const { code, stdout } = await pi.exec("pi", args, { cwd: ctx.cwd, timeout: SCOUT_TIMEOUT_MS });
 		const answer = code === 0 ? scoutAnswer(stdout) : undefined;
 		if (answer === undefined) return "not-found";
-		const found = withinBudget(answer, budget);
+		const found = withinBudget(answer, question.budget);
 		return found === "" ? "not-found" : { found };
 	} catch {
 		return "not-found";
@@ -663,9 +668,10 @@ async function placeGaps(
 			state.standing === "scout" ? { element: state.element, standing: "ask" } : state,
 		);
 	}
+	const questions = gaps.map((gap): ScoutQuestion => ({ prompt, gap, budget }));
 	ctx.ui.notify(scoutingNotice(gaps), "info");
-	const lookups = await Promise.all(gaps.map((gap) => askScout(pi, ctx, scout, prompt, gap, budget)));
-	const answers = new Map(gaps.map((gap, index) => [gap.element, lookups[index]] as const));
+	const lookups = await Promise.all(questions.map((question) => askScout(pi, ctx, scout, question)));
+	const answers = new Map(questions.map(({ gap }, index) => [gap.element, lookups[index]] as const));
 	return states.map((state): ElementState => {
 		if (state.standing !== "scout") return state;
 		const lookup = answers.get(state.element);
@@ -696,8 +702,17 @@ function statesOf(
 /** Whether an element is still a gap: neither carried by the prompt nor filled. */
 const isGap = (state: ElementState): boolean => state.standing !== "present" && state.standing !== "filled";
 
-/** One standing element a lookup fills, the words it fills the element with, and who supplied them. */
+/**
+ * One standing element the Shaper fills, its words, and whether the session's sources or the
+ * scout supplied them.
+ */
 type Fill = { element: StandingElement; words: string; source: FillSource };
+
+/** The phrase a fill's source gets after "filled" in the notices: the Boss reads who supplied the words. */
+const FILL_SOURCE_PHRASES: Record<FillSource, string> = {
+	session: "from the session",
+	scout: "by the scout",
+};
 
 /** The fills a prompt's state carries, ready for the reshape and the notice. */
 function fillsOf(states: readonly ElementState[]): Fill[] {
@@ -717,7 +732,7 @@ const STANDING_PHRASES: Record<Exclude<ElementState["standing"], "filled">, stri
 /** The phrase one standing element's place in the cascade gets in the notice, fills naming their source. */
 function standingPhrase(state: ElementState): string {
 	if (state.standing !== "filled") return STANDING_PHRASES[state.standing];
-	return state.source === "scout" ? "filled by the scout" : "filled from the session";
+	return `filled ${FILL_SOURCE_PHRASES[state.source]}`;
 }
 
 /**
@@ -815,8 +830,11 @@ const SHAPE_HEADERS: Record<StandingElement, string> = {
 	"done-when": "## Done-when",
 };
 
-/** The words the four headers add to `wordCount`: `##` and the element's name for each. */
-const SHAPE_HEADER_WORDS = STANDING_ELEMENTS.length * 2;
+/**
+ * The words the four headers add to `wordCount`: `##` and the element's name for each, read from
+ * the headers themselves.
+ */
+const SHAPE_HEADER_WORDS = wordCount(Object.values(SHAPE_HEADERS).join(" "));
 
 /**
  * Read the model's reshape as one string per element it was asked for, or `undefined` when it is not
@@ -917,15 +935,11 @@ const REVERT_KEY = "alt+r";
 
 /** The notice after a reshape, naming the elements each source filled when any did. */
 function shapeNotice(fills: readonly Fill[]): string {
-	const elements = (source: FillSource): string =>
-		fills.filter((fill) => fill.source === source).map(({ element }) => element).join(", ");
-	const filled = [
-		elements("session") === "" ? "" : `${elements("session")} filled from the session`,
-		elements("scout") === "" ? "" : `${elements("scout")} filled by the scout`,
-	]
-		.filter(Boolean)
-		.join("; ");
-	return `Shaper: shaped.${filled === "" ? "" : ` ${filled}.`} ${REVERT_KEY} restores your words.`;
+	const filled = (Object.keys(FILL_SOURCE_PHRASES) as FillSource[]).flatMap((source) => {
+		const elements = fills.filter((fill) => fill.source === source).map(({ element }) => element);
+		return elements.length === 0 ? [] : [`${elements.join(", ")} filled ${FILL_SOURCE_PHRASES[source]}`];
+	});
+	return `Shaper: shaped.${filled.length === 0 ? "" : ` ${filled.join("; ")}.`} ${REVERT_KEY} restores your words.`;
 }
 
 /** A shaped prompt held for the Boss: the words as typed, and the reshape shown in the editor. */

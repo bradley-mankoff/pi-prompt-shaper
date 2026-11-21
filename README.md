@@ -49,19 +49,19 @@ what the session already knows: the repo and branch it runs in, what the project
 the conversation so far, and the project's own notes (the `AGENTS.md` files pi loads). Each gap the
 session can place but not fill goes to the scout agent, in a process of its own cut off after 30
 seconds. The scout runs on the model its own definition names and with the read tools only: the
-Shaper drops `write` and `edit` from whatever the definition names, and tells the scout to leave no
-file behind. The Boss is told while a lookup runs, and the Shaper holds no lookup tool and reads
-nothing itself. The scout is told the words the reshape's cap leaves for its answer, and an answer
-that runs long is cut to that budget rather than thrown away. What the scout finds fills the
-element, and what it cannot find becomes a question, not a guess. Nothing is invented: a fill from
-the session is kept only when every one of its words is a whole word the session's own sources
-carry, and an unsupported fill becomes a gap. A short prompt whose four elements are then all
-there comes back under the four headers, carrying the typed words, the session's fills and the
-scout's context, in the editor. A prompt that still has a gap is reported element by element and
-goes on exactly as it was typed. Nothing is sent until Enter; `alt+r` puts the original words back
-in the editor. A
-reshape that changes a word or runs past the length cap (`min(3 x the original's words, 250)`) is
-dropped, and the prompt goes on as typed. The default stays silence.
+Shaper drops `write` and `edit` from whatever the definition names, gives it the read tools when
+the definition names none of them, and tells the scout to leave no file behind. The Boss is told
+while a lookup runs, and the Shaper holds no lookup tool and reads nothing itself. The scout is
+told the words the reshape's cap leaves for its answer, and an answer that runs long is cut to
+that budget rather than thrown away. What the scout finds fills the element, and what it cannot
+find becomes a question, not a guess. Nothing is invented: a fill from the session is kept only
+when every one of its words is a whole word the session's own sources carry, and an unsupported
+fill becomes a gap. A short prompt whose four elements are then all there comes back under the
+four headers, carrying the typed words, the session's fills and the scout's context, in the
+editor. A prompt that still has a gap is reported element by element and goes on exactly as it was
+typed. Nothing is sent until Enter; `alt+r` puts the original words back in the editor. A reshape
+that changes a word or runs past the length cap (`min(3 x the original's words, 250)`) is dropped,
+and the prompt goes on as typed. The default stays silence.
 
 ## What the Shaper will do
 
